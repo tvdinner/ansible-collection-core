@@ -5,14 +5,16 @@
 from __future__ import absolute_import, division, print_function
 __metaclass__ = type
 
-DOCUMENTATION = r'''
-name: connection
-short_description: Shared TLS and timeout options
-description:
-  - The connection options every tvdinner.* module repeats. Service URL and
-    token options differ per collection (C(gitea_url), C(lldap_url), ...) and
-    are documented by each module; TLS verification and timeout are identical
-    everywhere and live here.
+
+class ModuleDocFragment(object):
+    # Shared TLS and timeout options.
+    #
+    # The connection options every tvdinner.* module repeats. Service URL and
+    # token options differ per collection (C(gitea_url), C(lldap_url), ...) and
+    # are documented by each module; TLS verification and timeout are identical
+    # everywhere and live here. Use with
+    # C(extends_documentation_fragment: tvdinner.core.connection).
+    DOCUMENTATION = r'''
 options:
   validate_certs:
     description:

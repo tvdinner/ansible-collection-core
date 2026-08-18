@@ -17,7 +17,7 @@ jobs:
       - name: Install tooling (venv — system pip is externally managed)
         run: |
           python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --quiet --disable-pip-version-check ansible-core pytest pyyaml yamllint
+          /tmp/venv/bin/pip install --quiet --disable-pip-version-check yamllint flake8
       - run: PATH=/tmp/venv/bin:$PATH make lint
 
   test:

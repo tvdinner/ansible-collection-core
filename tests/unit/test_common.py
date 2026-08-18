@@ -1,8 +1,10 @@
-import sys
 import unittest
 
 from ansible_collections.tvdinner.core.plugins.module_utils.common import (
+    AUTH_TOKEN,
+    RESTClient,
     calculate_diff,
+    client_from_module,
     connection_argument_spec,
     normalize_dict_subset,
     normalize_list,
@@ -11,6 +13,9 @@ from ansible_collections.tvdinner.core.plugins.module_utils.common import (
 
 class FakeModule(object):
     _diff = True
+
+    def __init__(self, **params):
+        self.params = params
 
 
 class TestCommon(unittest.TestCase):
@@ -21,6 +26,17 @@ class TestCommon(unittest.TestCase):
         self.assertTrue(spec['gitea_token']['no_log'])
         self.assertTrue(spec['validate_certs']['default'])
         self.assertEqual(spec['timeout']['default'], 30)
+
+    def test_client_from_module_wires_params_and_kwargs(self):
+        module = FakeModule(gitea_url='https://g/', gitea_token='t',
+                            validate_certs=False, timeout=5)
+        client = client_from_module(module, RESTClient, 'gitea_url', 'gitea_token',
+                                    auth_style=AUTH_TOKEN)
+        self.assertEqual(client.base_url, 'https://g')
+        self.assertEqual(client.token, 't')
+        self.assertFalse(client.validate_certs)
+        self.assertEqual(client.timeout, 5)
+        self.assertEqual(client._auth_headers(), {'Authorization': 'token t'})
 
     def test_normalize_list(self):
         self.assertEqual(normalize_list(['b', 'a', 'b']), ['a', 'b'])

@@ -7,6 +7,7 @@ __metaclass__ = type
 
 import json
 
+from ansible.module_utils.common.text.converters import to_native
 from ansible.module_utils.urls import Request
 from ansible.module_utils.six.moves.urllib.error import HTTPError, URLError
 from ansible.module_utils.six.moves.urllib.parse import urlencode
@@ -34,13 +35,14 @@ class TVDinnerNotFoundError(TVDinnerError):
 class RESTClient(object):
     """Generic JSON REST client shared by every tvdinner.* collection.
 
-    Consolidates the seven bespoke clients the joestump.* collections each
+    Consolidates the bespoke clients the joestump.* collections each
     shipped: base URL joining, query params, JSON encode/decode, timeout,
     TLS verification, error mapping, and check-mode-safe semantics (modules
     decide when to call; the client never mutates on its own).
 
     Subclasses add product-specific endpoint methods on top of C(request).
-    Override C(_auth_headers) for unusual auth schemes.
+    Override C(_auth_headers) for unusual auth schemes and C(_error_message)
+    for APIs whose error bodies use a different shape.
     """
 
     def __init__(self, url, token=None, auth_style=AUTH_BEARER,
@@ -51,6 +53,8 @@ class RESTClient(object):
         self.auth_header_name = auth_header_name
         self.validate_certs = validate_certs
         self.timeout = timeout
+        if auth_style == AUTH_HEADER and not auth_header_name:
+            raise TVDinnerError('auth_header_name is required for header auth')
         self._request = Request(use_netrc=False)
 
     def _auth_headers(self):
@@ -60,10 +64,23 @@ class RESTClient(object):
         if self.auth_style == AUTH_TOKEN:
             return {'Authorization': 'token {0}'.format(self.token)}
         if self.auth_style == AUTH_HEADER:
-            if not self.auth_header_name:
-                raise TVDinnerError('auth_header_name is required for header auth')
             return {self.auth_header_name: self.token}
         return {'Authorization': 'Bearer {0}'.format(self.token)}
+
+    def _error_message(self, parsed, body, error):
+        """Extract a human-readable message from an HTTP error response.
+
+        Args:
+            parsed: JSON-decoded body (any type), or None when not JSON.
+            body: raw response bytes (may be empty).
+            error: the underlying HTTPError.
+        """
+        message = None
+        if isinstance(parsed, dict):
+            message = parsed.get('message') or parsed.get('error') or parsed.get('errors')
+        if not message:
+            message = to_native(body, errors='surrogate_or_replace') if body else str(error)
+        return message
 
     def request(self, method, endpoint, data=None, params=None,
                 basic_auth=None, headers=None, ok_not_found=False):
@@ -73,7 +90,8 @@ class RESTClient(object):
             method: HTTP method (GET, POST, PUT, DELETE, PATCH).
             endpoint: API path, appended to the base URL.
             data: request body, JSON-encoded when not None.
-            params: dict of query-string parameters.
+            params: dict of query-string parameters. None values are dropped;
+                list values repeat the key (C(?a=1&a=2)).
             basic_auth: optional C((user, password)) tuple; switches the
                 request to HTTP Basic auth and drops the token header.
             headers: extra headers merged over the default set.
@@ -85,13 +103,14 @@ class RESTClient(object):
 
         Raises:
             TVDinnerNotFoundError: on 404 (unless C(ok_not_found)).
-            TVDinnerError: on any other API or connection error.
+            TVDinnerError: on any other API or connection error, or when a
+                successful response is not valid JSON.
         """
         url = '{0}{1}'.format(self.base_url, endpoint)
         if params:
-            params = dict((k, v) for k, v in params.items() if v is not None)
+            params = {k: v for k, v in params.items() if v is not None}
             if params:
-                url = '{0}?{1}'.format(url, urlencode(params))
+                url = '{0}?{1}'.format(url, urlencode(params, doseq=True))
 
         all_headers = {
             'Content-Type': 'application/json',
@@ -118,35 +137,31 @@ class RESTClient(object):
         try:
             response = self._request.open(**open_kwargs)
         except HTTPError as e:
-            body = e.read()
-            parsed = None
-            try:
-                parsed = json.loads(body) if body else None
-            except (ValueError, TypeError):
-                parsed = None
-            message = None
-            if isinstance(parsed, dict):
-                message = parsed.get('message') or parsed.get('error') or parsed.get('errors')
-            if not message:
-                message = body.decode('utf-8') if body else str(e)
             if e.code == 404 and ok_not_found:
                 return None
+            body = e.read()
+            try:
+                parsed = json.loads(to_native(body, errors='surrogate_or_replace')) if body else None
+            except (ValueError, TypeError):
+                parsed = None
             error_class = TVDinnerNotFoundError if e.code == 404 else TVDinnerError
             raise error_class(
-                'API error ({0}): {1}'.format(e.code, message),
+                'API error ({0}): {1}'.format(e.code, self._error_message(parsed, body, e)),
                 status_code=e.code,
                 response=parsed,
             )
         except URLError as e:
             raise TVDinnerError('Connection error: {0}'.format(getattr(e, 'reason', e)))
-        except TVDinnerError:
-            raise
         except Exception as e:
             raise TVDinnerError('Unexpected error: {0}'.format(str(e)))
 
-        if response.status == 204:
-            return None
         content = response.read()
-        if content:
-            return json.loads(content)
-        return None
+        if not content:
+            return None
+        try:
+            return json.loads(to_native(content, errors='surrogate_or_replace'))
+        except ValueError as e:
+            raise TVDinnerError(
+                'Invalid JSON in response ({0}): {1}'.format(response.getcode(), str(e)),
+                status_code=response.getcode(),
+            )

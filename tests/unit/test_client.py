@@ -33,6 +33,9 @@ class FakeResponse(object):
         self.status = status
         self._body = body
 
+    def getcode(self):
+        return self.status
+
     def read(self):
         return self._body
 
@@ -47,7 +50,7 @@ class TestRESTClient(unittest.TestCase):
         self.assertEqual(client.base_url, 'https://api.example.com')
 
     def test_bearer_auth_headers(self):
-        headers = self._client().request.__self__._auth_headers()
+        headers = self._client()._auth_headers()
         self.assertEqual(headers, {'Authorization': 'Bearer sekrit'})
 
     def test_token_auth_headers(self):
@@ -55,8 +58,8 @@ class TestRESTClient(unittest.TestCase):
         self.assertEqual(headers, {'Authorization': 'token sekrit'})
 
     def test_header_auth_requires_name(self):
-        client = RESTClient('https://x', 'sekrit', auth_style='header')
-        self.assertRaises(TVDinnerError, client._auth_headers)
+        with self.assertRaises(TVDinnerError):
+            RESTClient('https://x', 'sekrit', auth_style='header')
 
     def test_header_auth_custom_name(self):
         client = RESTClient('https://x', 'sekrit', auth_style='header',
@@ -149,6 +152,47 @@ class TestRESTClient(unittest.TestCase):
         headers = open_mock.call_args[1]['headers']
         self.assertEqual(headers['X-Custom'], '1')
         self.assertEqual(headers['Authorization'], 'Bearer sekrit')
+
+    @patch('ansible.module_utils.urls.Request.open')
+    def test_list_params_repeat_key(self, open_mock):
+        open_mock.return_value = FakeResponse(200, b'[]')
+        self._client().request('GET', '/things', params={'labels': ['bug', 'toil']})
+        url = open_mock.call_args[1]['url']
+        self.assertIn('labels=bug&labels=toil', url)
+
+    @patch('ansible.module_utils.urls.Request.open')
+    def test_non_json_success_body_raises_structured_error(self, open_mock):
+        open_mock.return_value = FakeResponse(200, b'<html>login</html>')
+        with self.assertRaises(TVDinnerError) as ctx:
+            self._client().request('GET', '/things')
+        self.assertEqual(ctx.exception.status_code, 200)
+        self.assertIn('Invalid JSON', str(ctx.exception))
+
+    @patch('ansible.module_utils.urls.Request.open')
+    def test_non_utf8_error_body_does_not_crash(self, open_mock):
+        open_mock.side_effect = HTTPError(
+            'url', 502, 'Bad Gateway', {}, io.BytesIO(b'\xff\xfe bad gateway'))
+        with self.assertRaises(TVDinnerError) as ctx:
+            self._client().request('GET', '/things')
+        self.assertEqual(ctx.exception.status_code, 502)
+
+    @patch('ansible.module_utils.urls.Request.open')
+    def test_404_ok_not_found_ignores_unreadable_body(self, open_mock):
+        open_mock.side_effect = HTTPError(
+            'url', 404, 'Not Found', {}, io.BytesIO(b'\xff\xfe'))
+        self.assertIsNone(self._client().request('GET', '/things/1', ok_not_found=True))
+
+    @patch('ansible.module_utils.urls.Request.open')
+    def test_error_message_hook_overridable(self, open_mock):
+        class Client(RESTClient):
+            def _error_message(self, parsed, body, error):
+                return parsed['detail']
+
+        open_mock.side_effect = HTTPError(
+            'url', 400, 'Bad Request', {}, io.BytesIO(b'{"detail": "custom shape"}'))
+        with self.assertRaises(TVDinnerError) as ctx:
+            Client('https://x', 't').request('GET', '/things')
+        self.assertIn('custom shape', str(ctx.exception))
 
     def test_auth_style_constants(self):
         self.assertEqual((AUTH_BEARER, AUTH_TOKEN), ('bearer', 'token'))

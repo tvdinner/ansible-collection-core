@@ -1,0 +1,19 @@
+name: core
+namespace: tvdinner
+version: 1.0.0
+readme: README.md
+authors:
+  - Joe Stump (@joestump)
+license:
+  - MIT
+tags:
+  - ansible
+  - collection
+  - docker
+  - selfhosting
+  - infrastructure
+repository: https://gitea.stump.rocks/tvdinner/ansible-collection-core
+documentation: https://tvdinner.pages.stump.rocks/ansible-collection-core/
+homepage: https://gitea.stump.rocks/tvdinner
+issues: https://gitea.stump.rocks/tvdinner/ansible-collection-core/issues
+description: Shared foundation for TV Dinner - the service and node roles, plus the common REST client base every tvdinner.* collection builds on.

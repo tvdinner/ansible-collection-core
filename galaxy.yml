@@ -17,9 +17,22 @@ documentation: https://tvdinner.pages.stump.rocks/ansible-collection-core/
 homepage: https://gitea.stump.rocks/tvdinner
 issues: https://gitea.stump.rocks/tvdinner/ansible-collection-core/issues
 description: Shared foundation for TV Dinner - the service and node roles, plus the common REST client base every tvdinner.* collection builds on.
+# Collections the service, base and node roles call into. Pinned loosely: the
+# roles use long-stable module surfaces (route53, docker_compose_v2, hashi_vault
+# lookup, postgresql_*, mysql_*, snap, sysctl, authorized_key).
+dependencies:
+  amazon.aws: '>=6.0.0'
+  ansible.posix: '>=1.5.0'
+  community.docker: '>=3.4.0'
+  community.general: '>=7.0.0'
+  community.hashi_vault: '>=5.0.0'
+  community.mysql: '>=3.7.0'
+  community.postgresql: '>=3.0.0'
 build_ignore:
   - build
   - tests
+  - molecule
+  - ansible.cfg
   - .gitea
   - .gitignore
   - .yamllint

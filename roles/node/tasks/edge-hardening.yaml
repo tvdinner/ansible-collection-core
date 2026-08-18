@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/edge-hardening.yaml
+# roles/node/tasks/edge-hardening.yaml
 #
 # Governing: ADR-0044 (Docker-over-WireGuard + host Caddy — public edge posture),
 # ADR-0013 (CrowdSec for network threat detection).

@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/caddy.yaml
+# roles/node/tasks/caddy.yaml
 
 - name: Create Caddy network
   community.docker.docker_network:

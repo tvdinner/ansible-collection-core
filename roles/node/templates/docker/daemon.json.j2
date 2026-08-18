@@ -1,0 +1,37 @@
+{#- Governing: ADR-0044 (Docker over WireGuard, host Caddy), SPEC-0025 REQ "Host-Conditional
+    Docker Daemon Binding". host_edge=true (public/edge hosts, e.g. cloud01): NO tcp control-plane,
+    and any unspecified published port binds the WireGuard mesh IP, never 0.0.0.0. host_edge=false
+    (LAN/DUB, the default): byte-for-byte unchanged — tcp://0.0.0.0:2375 is load-bearing for the
+    docker_hosts monitoring (Homepage/WUD/Uptime-Kuma scrape it) and is contained behind the LAN.
+    docker_tcp_enabled=false (default true): omit the tcp://0.0.0.0:2375 control-plane and bind the
+    unix socket only — for LAN hosts that are NOT scraped by Homepage and shouldn't expose an
+    unauthenticated root Docker API (e.g. the `kitt` desktop workstation). Default true keeps every
+    existing host byte-for-byte unchanged. -#}
+{
+{% if host_edge | default(false) %}
+  "hosts": ["unix:///var/run/docker.sock"],
+  "ip": "{{ host_wireguard.address[0].split('/')[0] }}",
+{% elif not docker_tcp_enabled | default(true) %}
+  "hosts": ["unix:///var/run/docker.sock"],
+{% else %}
+
+  "hosts": [
+    "tcp://0.0.0.0:2375",
+    "unix:///var/run/docker.sock"
+  ],
+{% endif %}
+  "debug" : false,
+  "dns": ["1.1.1.1", "8.8.8.8"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }{%- if nvidia is defined and nvidia -%},
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  }{%- endif -%}
+
+}

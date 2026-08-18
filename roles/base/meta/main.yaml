@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: joestump
+  namespace: tvdinner
+  description: Birthright host automation shared by every node (packages, DNS, unattended upgrades, users)
+  license: MIT
+  min_ansible_version: "2.14"
+
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+dependencies: []

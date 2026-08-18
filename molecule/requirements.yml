@@ -1,0 +1,11 @@
+---
+# Collections the tvdinner.core roles reference; installed into build/ by
+# `make molecule` (mirrors galaxy.yml dependencies).
+collections:
+  - name: amazon.aws
+  - name: ansible.posix
+  - name: community.docker
+  - name: community.general
+  - name: community.hashi_vault
+  - name: community.mysql
+  - name: community.postgresql

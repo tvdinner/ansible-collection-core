@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/wireguard.yaml
+# roles/node/tasks/wireguard.yaml
 # Host-level WireGuard via wg-quick, for attaching a host to a WireGuard peer
 # (e.g. the internet-exposed, Docker-less Infomaniak VPS cloud01 joining the
 # StumpCloud UniFi gateway). Runs as a systemd wg-quick@<iface> unit, NOT a

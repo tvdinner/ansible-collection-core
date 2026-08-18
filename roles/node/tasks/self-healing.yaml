@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/self-healing.yaml
+# roles/node/tasks/self-healing.yaml
 
 # --- SSH deploy key for git clone ---
 - name: Create root SSH directory

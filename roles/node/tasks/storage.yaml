@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/storage.yaml
+# roles/node/tasks/storage.yaml
 # ZFS pool setup, ZED email alerting, and node_exporter metrics.
 # Only runs when host_zfs_pool.name is defined.
 # Governing: ADR-0020 (disk passthrough), ADR-0015 (observability)

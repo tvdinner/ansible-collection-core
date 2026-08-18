@@ -38,8 +38,6 @@ jobs:
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet --disable-pip-version-check ansible-core molecule molecule-plugins[docker] pytest-testinfra docker
-      - name: Install collections the roles reference
-        run: /tmp/venv/bin/ansible-galaxy collection install amazon.aws community.hashi_vault community.docker
       - run: PATH=/tmp/venv/bin:$PATH make molecule
 
   gitleaks:

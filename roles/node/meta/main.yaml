@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: joestump
+  namespace: tvdinner
+  description: Full node bootstrap and nightly self-heal (includes tvdinner.core.base, Docker, Caddy, WireGuard, storage)
+  license: MIT
+  min_ansible_version: "2.14"
+
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+dependencies: []

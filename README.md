@@ -7,8 +7,17 @@ collection family — reusable Ansible for self-hosting.
 
 - **`tvdinner.core.service` role** — manage a self-hosted Docker service on a
   StumpCloud node: container, networks, caddy vhost, backups wiring.
-- **`tvdinner.core.node` role** — node baseline: docker, users, storage, swap,
-  caddy, edge hardening, self-healing.
+- **`tvdinner.core.base` role** — birthright automation every node gets:
+  packages, DNS registration (`base_manage_dns`), unattended security
+  upgrades, users. Included by `node`; usable on its own.
+- **`tvdinner.core.node` role** — node baseline: `base` plus docker, users,
+  storage, swap, caddy, edge hardening, self-healing.
+
+The roles call into `amazon.aws`, `ansible.posix`, `community.docker`,
+`community.general`, `community.hashi_vault`, `community.mysql` and
+`community.postgresql` (declared as `dependencies` in `galaxy.yml`), and
+expect the StumpCloud inventory shape (`dns.wtf`, `vault_conn`, `paths.local`,
+`tz`, `smtp`, `aws.letsencrypt`); see each role's `defaults/main.yaml`.
 - **`plugins/module_utils`** — the shared `RESTClient` and helpers every
   `tvdinner.*` API collection builds on. One client instead of seven bespoke
   copies: URL joining, query params, JSON handling, timeout, TLS verification,
@@ -44,7 +53,8 @@ ansible-galaxy collection install git+https://gitea.stump.rocks/tvdinner/ansible
 ## Development
 
 ```sh
-make check   # lint + test
+make check      # lint + test
+make molecule   # converge tvdinner.core.base in a Debian 12 container (Docker)
 ```
 
 ## License

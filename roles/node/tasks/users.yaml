@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/users.yaml
+# roles/node/tasks/users.yaml
 
 # --- Service groups and users ---
 - name: Create service groups

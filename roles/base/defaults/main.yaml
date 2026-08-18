@@ -72,6 +72,18 @@ base_pip_packages:
 # gets written on every host with `mtu: None`. Check mode caught exactly that.
 host_mtu: null
 
+# --- DNS registration ---
+#
+# Whether to manage the host's Route53 A record. Set to false in molecule/tests
+# and any environment without AWS credentials. Defaults to true so existing
+# stumpcloud behavior is unchanged.
+base_manage_dns: true
+
+# lsb-core is Ubuntu-only; Debian hosts (and molecule scenarios) override this.
+base_lsb_packages:
+  - lsb-release
+  - lsb-core
+
 # --- unattended security updates ---
 #
 # Governing: ADR-0051 (a hypervisor's package state belongs to Proxmox).
@@ -80,15 +92,6 @@ host_mtu: null
 # in the fleet had unattended-upgrades installed, and the hypervisors have no
 # ansible-pull self-heal, so they were patched only when an operator happened to
 # run a converge.
-# Set to false in molecule/tests and any environment without AWS credentials.
-# Defaults to true so existing stumpcloud behavior is unchanged.
-base_manage_dns: true
-
-# lsb-core is Ubuntu-only; Debian hosts (and molecule scenarios) override this.
-base_lsb_packages:
-  - lsb-release
-  - lsb-core
-
 base_unattended_enabled: true
 
 # Debian security ONLY, and the omission of the Proxmox repo is load-bearing

@@ -1,5 +1,5 @@
 ---
-# roles/host/defaults/main.yaml
+# roles/node/defaults/main.yaml
 
 # --- VM provisioning (Proxmox) ---
 host_proxmox_enabled: "{{ proxmox is defined and proxmox.api_url is defined }}"

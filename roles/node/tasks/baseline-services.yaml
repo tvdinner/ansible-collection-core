@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/baseline-services.yaml
+# roles/node/tasks/baseline-services.yaml
 # Deploys baseline infrastructure containers on every node.
 
 # --- Homepage dashboard ---

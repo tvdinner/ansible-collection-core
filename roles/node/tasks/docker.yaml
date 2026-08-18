@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/docker.yaml
+# roles/node/tasks/docker.yaml
 
 - name: Uninstall legacy Docker packages
   ansible.builtin.apt:
@@ -101,13 +101,13 @@
 
 - name: Configure Docker systemd override
   ansible.builtin.template:
-    src: ../../playbooks/files/docker/override.conf.j2
+    src: docker/override.conf.j2
     dest: /etc/systemd/system/docker.service.d/override.conf
   register: docker_override_conf
 
 - name: Configure Docker daemon
   ansible.builtin.template:
-    src: ../../playbooks/files/docker/daemon.json.j2
+    src: docker/daemon.json.j2
     dest: /etc/docker/daemon.json
   register: docker_daemon_conf
 

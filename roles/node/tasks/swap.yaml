@@ -1,5 +1,5 @@
 ---
-# roles/host/tasks/swap.yaml
+# roles/node/tasks/swap.yaml
 # OOM safety net: allocate a swap file, persist it in fstab, and lower vm.swappiness.
 # Governing: OMG 2026-07-03 (ie01 oversubscription) — stumpcloud#16.
 # ie01 runs ~100 containers on 8c/24GB with zero swap; a memory spike OOM-kills a
@@ -68,7 +68,7 @@
     group: root
     mode: "0644"
     content: |
-      # Managed by Ansible (roles/host swap.yaml). Governing: stumpcloud#16.
+      # Managed by Ansible (tvdinner.core.node swap.yaml). Governing: stumpcloud#16.
       vm.swappiness = {{ host_swap_swappiness }}
   register: _swappiness_conf
   when: host_swap_enabled | bool

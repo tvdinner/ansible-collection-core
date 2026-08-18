@@ -84,6 +84,14 @@ class TestRESTClient(unittest.TestCase):
         self.assertIn('page=2', url)
 
     @patch('ansible.module_utils.urls.Request.open')
+    def test_params_none_values_dropped(self, open_mock):
+        open_mock.return_value = FakeResponse(200, b'[]')
+        self._client().request('GET', '/things', params={'a': 'yes', 'b': None})
+        url = open_mock.call_args[1]['url']
+        self.assertIn('a=yes', url)
+        self.assertNotIn('b=', url)
+
+    @patch('ansible.module_utils.urls.Request.open')
     def test_204_returns_none(self, open_mock):
         open_mock.return_value = FakeResponse(204)
         self.assertIsNone(self._client().request('DELETE', '/things/1'))

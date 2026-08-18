@@ -89,7 +89,9 @@ class RESTClient(object):
         """
         url = '{0}{1}'.format(self.base_url, endpoint)
         if params:
-            url = '{0}?{1}'.format(url, urlencode(params))
+            params = dict((k, v) for k, v in params.items() if v is not None)
+            if params:
+                url = '{0}?{1}'.format(url, urlencode(params))
 
         all_headers = {
             'Content-Type': 'application/json',

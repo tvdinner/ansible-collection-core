@@ -71,7 +71,7 @@
     - "{{ dns.wtf }}"
   delegate_to: localhost
   become: false
-  when: wg0 is defined or ansible_default_ipv4 is defined
+  when: base_manage_dns | default(true) and (wg0 is defined or ansible_default_ipv4 is defined)
   # `localhost` is not declared in the inventories, so it inherits all.vars —
   # including `ansible_host: "{{ inventory_hostname }}.{{ dns.wtf }}"` and the
   # fleet's become settings. Without these three lines the delegated task tries
@@ -258,7 +258,7 @@
 # guessing there destroys the fleet's only collector key; this only READS a
 # public key, so guessing costs one deferred authorization.
 - name: Install the rack-hud collector key
-  when: _rack_hud_pubkey | length > 0
+  when: _rack_hud_pubkey | default('', true) | length > 0
   block:
     - name: Resolve the collector user's home directory
       ansible.builtin.getent:

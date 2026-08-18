@@ -65,9 +65,7 @@
 - name: Install LSB packages
   ansible.builtin.apt:
     state: present
-    name:
-      - lsb-release
-      - lsb-core
+    name: "{{ base_lsb_packages }}"
   # `is defined` guard: an unreachable host (playbooks/base.yaml's
   # ignore_unreachable) never gets Gathering Facts, so ansible_distribution_release
   # is undefined for it — a bare `!=` against an undefined value is a hard task

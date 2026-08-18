@@ -1,0 +1,9 @@
+---
+- name: Verify
+  hosts: all
+  tasks:
+    - name: Common layer applied
+      ansible.builtin.stat:
+        path: /etc/apt/apt.conf.d/52stumpcloud-unattended-upgrades
+      register: auto_upgrades
+      failed_when: not auto_upgrades.stat.exists

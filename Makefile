@@ -7,11 +7,11 @@
 
 PYTHON ?= python3
 
-.PHONY: test lint check clean build-tree
+.PHONY: test lint check clean build-tree molecule
 
 build-tree:
 	@mkdir -p build/ansible_collections/tvdinner
-	@ln -sfn ../../.. build/ansible_collections/tvdinner/core
+	@[ -e build/ansible_collections/tvdinner/core ] || (mkdir -p build/ansible_collections/tvdinner/core 		&& find . -path ./build -prune -o -type f -print0 | xargs -0 -I{} install -D {} build/ansible_collections/tvdinner/core/{})
 
 test: build-tree
 	PYTHONPATH=build $(PYTHON) -m pytest tests/ -v
@@ -22,6 +22,10 @@ lint: build-tree
 	$(PYTHON) -m flake8 plugins tests --max-line-length=120 --extend-ignore=E402
 
 check: lint test
+
+molecule:
+	$(MAKE) build-tree
+	ANSIBLE_CONFIG=ansible.cfg molecule test
 
 clean:
 	rm -rf build

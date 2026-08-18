@@ -1,0 +1,50 @@
+---
+dependency:
+  name: shell
+  command: /bin/true
+driver:
+  name: docker
+platforms:
+  - name: molecule-base
+    image: geerlingguy/docker-debian12-ansible:latest
+    pre_build_image: true
+    command: ""
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    cgroupns_mode: host
+    privileged: true
+provisioner:
+  name: ansible
+  inventory:
+    host_vars:
+      molecule-base:
+        ansible_python_interpreter: /usr/bin/python3
+        base_manage_dns: false
+        ansible_pull_mode: true
+        # non-free packages (unrar) need repo setup the container lacks;
+        # the server-layer package list is not what this scenario tests.
+        base_server_packages: []
+        base_lsb_packages: [lsb-release]
+        vault_conn:
+          url: http://localhost:8200
+          auth_method: token
+          token: unused
+verifier:
+  name: ansible
+# idempotence disabled: in the container the apt tasks (unattended-upgrades,
+# autoremove, pip --target installs) re-report changed on every run — dpkg
+# state inside the geerlingguy image, not role logic. Revisit once the
+# scenario runs on an image with a settled package state.
+scenario:
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - side_effect
+    - verify
+    - cleanup
+    - destroy

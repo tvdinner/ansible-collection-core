@@ -1,0 +1,255 @@
+---
+# Default values for the service role
+# These can be overridden by the playbook or inventory
+#
+# Usage: Pass a config object containing service settings:
+#   vars:
+#     service_config: "{{ jellyfin }}"
+#
+# Config keys (without service_ prefix):
+#   name, dns, data_dir, image, port, enabled, puid, pgid,
+#   homepage, caddy, oauth2_proxy, db, redis, volumes, dirs,
+#   environment, labels, networks, ports, restart, privileged,
+#   devices, security, vpn, healthcheck, resources, gpu,
+#   dns_cname, command, sidecars, depends_on, aliases, user,
+#   secrets, secrets_file_env, homepage_secrets
+
+# Service config object (passed from playbook)
+service_config: {}
+
+# DNS domains — Governing: ADR-0042 (external/internal domain split).
+# The role separates the PUBLIC surface (Caddy vhost, OIDC/auth URLs, Route53
+# CNAMEs, Homepage/Kuma links) from INTERNAL addressing (controller→DB login_host,
+# container→host extra_hosts). Both fall back to the legacy single `dns.wtf`, so
+# split-horizon hosts (DUB) are byte-for-byte unchanged; edge hosts (cloud01) set
+# `dns.external: stump.wtf` + `dns.internal: stump.rocks` in inventory to split them.
+service_dns_external: "{{ dns.external | default(dns.wtf) }}"
+service_dns_internal: "{{ dns.internal | default(dns.wtf) }}"
+# The domain a service is SERVED under (Caddy vhost + its Route53 record). Defaults to
+# the external site domain; a service may override it (e.g. domain: stump.rocks to publish
+# an internal-only tool off the .wtf edge). The CNAME still TARGETS the host's real FQDN,
+# so no per-host record in the override domain is needed. ADR-0042 seam; Technitium later.
+service_public_domain: "{{ service_config.domain | default(service_dns_external) }}"
+
+# Service basics - read from service_config if available
+service_name: "{{ service_config.name | default('') }}"
+service_dns: "{{ service_config.dns | default(service_name) }}"
+service_data_dir: "{{ service_config.data_dir | default(service_name) }}"
+service_image: "{{ service_config.image | default('') }}"
+service_port: "{{ service_config.port | default(8080) }}"
+service_enabled: "{{ service_config.enabled | default(true) }}"
+
+# Container user/group IDs
+service_puid: "{{ service_config.puid | default(3000) }}"
+service_pgid: "{{ service_config.pgid | default(3001) }}"
+
+# Homepage integration
+service_homepage: "{{ service_config.homepage | default({
+  'enabled': true,
+  'group': 'Applications',
+  'name': service_name | title,
+  'icon': service_name,
+  'description': service_name | title ~ ' on ' ~ inventory_hostname,
+  'weight': 100
+}) }}"
+
+# Caddy reverse proxy
+service_caddy: "{{ service_config.caddy | default({'enabled': true}) }}"
+
+# OAuth2 Proxy forward_auth (requires shared oauth2-proxy container)
+# When enabled, Caddy will check auth via forward_auth before proxying.
+# The remote_user_header is passed to the upstream for HTTP remote user auth.
+# Example:
+#   oauth2_proxy:
+#     enabled: true
+#     remote_user_header: X-Auth-Request-Email
+service_oauth2_proxy: "{{ {
+  'enabled': false,
+  'container': 'auth',
+  'port': 4180,
+  'auth_url': 'https://auth.' ~ service_dns_external,
+  'remote_user_header': 'X-Auth-Request-Email'
+} | combine(service_config.oauth2_proxy | default({})) }}"
+
+# Database configuration (optional)
+service_db: "{{ service_config.db | default({
+  'enabled': false,
+  'type': 'postgres',
+  'name': service_name,
+  'user': service_name
+}) }}"
+
+# Redis configuration (optional)
+service_redis: "{{ service_config.redis | default({
+  'enabled': false,
+  'host': inventory_hostname,
+  'port': 6379,
+  'index': 0
+}) }}"
+
+# Volume mounts
+service_volumes: "{{ service_config.volumes | default([]) }}"
+
+# Directories to create under paths.local/service_dns
+service_dirs: "{{ service_config.dirs | default([]) }}"
+
+# Environment variables
+service_environment: "{{ service_config.environment | default({}) }}"
+
+# Additional labels
+service_labels: "{{ service_config.labels | default({}) }}"
+
+# AutoKuma container monitors — Governing: ADR-0015 (observability)
+# A docker-type Kuma monitor is bound to a registered Docker daemon by NUMERIC id
+# (Uptime Kuma's `docker_host.id`), never by hostname, so the id has to come from
+# inventory. It used to default to '1', which silently aimed every container check
+# on ie01/ie02/pie02 at pie01's daemon: Kuma looked for the container on the wrong
+# host, never found it, and reported DOWN. That single fallback accounted for ~140
+# of DUB's 142 red monitors and hid for months because '1' is a plausible id.
+# There is therefore no safe default — an empty value is caught by a guard in
+# tasks/main.yaml rather than silently mis-binding the host's whole monitor set.
+service_kuma_docker_host_id: "{{ kuma_docker_host_id | default('') }}"
+
+# Only a host whose daemon is registered in Kuma can carry container monitors.
+# Everywhere else (cloud01, chat01, swiss01 — no AutoKuma agent, no docker_host
+# row) the labels were inert noise pointing at another site's daemon, so they are
+# not emitted at all. `docker_hosts` is currently the same set as `autokuma`, and
+# it is the group that decides binding, so it is the one gating this.
+service_kuma_docker_enabled: "{{ inventory_hostname in (groups['docker_hosts'] | default([])) }}"
+
+# Container networks
+service_networks: "{{ service_config.networks | default(['caddy']) }}"
+
+# Port mappings (host:container or host:container/protocol)
+service_ports: "{{ service_config.ports | default([]) }}"
+
+# Restart policy
+service_restart: "{{ service_config.restart | default('unless-stopped') }}"
+
+# Privileged mode
+service_privileged: "{{ service_config.privileged | default(false) }}"
+
+# PID namespace mode (e.g., 'host' for host PID namespace)
+service_pid: "{{ service_config.pid | default('') }}"
+
+# Container user override (e.g., "3000:3001") for images that ignore PUID/PGID env vars.
+# Leave empty to use the image's default user.
+service_user: "{{ service_config.user | default('') }}"
+
+# Device mappings
+service_devices: "{{ service_config.devices | default([]) }}"
+
+# Security options
+service_security: "{{ {
+  'no_new_privileges': false,
+  'cap_drop': [],
+  'cap_add': []
+} | combine(service_config.security | default({})) }}"
+
+# VPN/Gluetun network mode
+service_vpn: "{{ service_config.vpn | default({
+  'enabled': false,
+  'container': 'gluetun'
+}) }}"
+
+# Healthcheck (optional)
+service_healthcheck: "{{ service_config.healthcheck | default({}) }}"
+
+# Resource limits (optional)
+service_resources: "{{ service_config.resources | default({}) }}"
+
+# GPU device reservations (optional). When enabled, the role emits a
+# deploy.resources.reservations.devices entry (Docker Compose GPU spec) so the
+# container is scheduled onto the NVIDIA GPU via nvidia-container-toolkit. It is
+# merged with any service_resources limits/reservations. Requires the target
+# host to have the NVIDIA driver + container toolkit (see playbooks/nvidia.yaml).
+# Example:
+#   gpu:
+#     enabled: true
+#     count: all           # 'all', or an integer; ignored when device_ids is set
+#     device_ids: []        # e.g. ["0"] or ["GPU-<uuid>"] to pin specific GPUs
+#     capabilities: [gpu]   # docker device capabilities
+service_gpu: "{{ {
+  'enabled': false,
+  'count': 'all',
+  'device_ids': [],
+  'capabilities': ['gpu']
+} | combine(service_config.gpu | default({})) }}"
+
+# Container ulimits (optional) — e.g. {nofile: {soft: 65536, hard: 524288}}
+service_ulimits: "{{ service_config.ulimits | default({}) }}"
+
+# Shared memory size (optional) — e.g. '1g'. Needed by frameworks that use
+# /dev/shm heavily (vLLM's engine, PyTorch dataloaders); Docker's 64m default
+# is too small and causes bus errors. Empty leaves the Docker default.
+service_shm_size: "{{ service_config.shm_size | default('') }}"
+
+# Container command override
+service_command: "{{ service_config.command | default([]) }}"
+
+# Additional sidecar services for Docker Compose
+# Each entry is a dict with container name as key and service definition as value
+# Each inherits service_restart unless it sets its own `restart:` — see the
+# _service_sidecars_with_kuma_labels note in tasks/main.yaml for why.
+# Example:
+#   sidecars:
+#     gotenberg:
+#       image: gotenberg/gotenberg:7.8
+#       command: ["gotenberg", "--chromium-disable-javascript=true"]
+#     tika:
+#       image: apache/tika:latest
+service_sidecars: "{{ service_config.sidecars | default({}) }}"
+
+# depends_on for the main app container (list of sidecar names)
+service_depends_on: "{{ service_config.depends_on | default([]) }}"
+
+# Docker Compose pull policy and recreate behavior
+service_pull: "{{ service_config.pull | default('policy') }}"
+service_recreate: "{{ service_config.recreate | default('auto') }}"
+
+# Timeout in seconds for container shutdown when stopping/recreating
+service_timeout: "{{ service_config.timeout | default(120) }}"
+
+# Alias domains that redirect to the primary service URL
+# Example:
+#   aliases:
+#     - hoarder.stump.wtf
+#     - hoarder.stump.rocks
+service_aliases: "{{ service_config.aliases | default([]) }}"
+
+# DNS CNAME creation
+service_dns_cname: "{{ service_config.dns_cname | default({'enabled': true}) }}"
+
+# Docker Compose file-based secrets (sourced from OpenBao at deploy time)
+# Governing: SPEC-0002 REQ "Service Role Defaults"
+service_secrets: "{{ service_config.secrets | default({}) }}"
+service_secrets_file_env: "{{ service_config.secrets_file_env | default({}) }}"
+
+# Homepage widget credentials — Governing: ADR-0006 (file-based secret delivery)
+#
+# A homepage.widget.password/key label is PLAINTEXT in `docker inspect`, so every
+# container with Docker socket access can read it. On these hosts that is
+# Homepage, Dozzle, the Beszel agent, AutoKuma, Alloy and WUD — several of which
+# ship data off-host. It also lands in any compose dump or metadata export.
+#
+# Declare the credential here instead of in `labels`. The role emits Homepage's
+# own {{HOMEPAGE_FILE_*}} indirection as the label value; the Homepage instance
+# resolves it at render time from a 0600 file it holds locally:
+#
+#   homepage_secrets:
+#     key: sonarr_key      -> homepage.widget.key = {{HOMEPAGE_FILE_SONARR_KEY}}
+#
+# The name on the right MUST also appear in that site's `homepage_widget_secrets`
+# map (consumed by playbooks/services/homepage.yaml) or the widget renders the
+# placeholder literally and the API call 401s.
+service_homepage_secrets: "{{ service_config.homepage_secrets | default({}) }}"
+
+# homepage.widget.* fields treated as credentials. The role refuses to put a
+# literal value on any of them — see the assert in tasks/main.yaml.
+service_homepage_secret_fields:
+  - key
+  - password
+  - token
+  - secret
+  - apiKey
+  - passphrase

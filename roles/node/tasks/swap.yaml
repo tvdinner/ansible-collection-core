@@ -1,0 +1,80 @@
+---
+# roles/host/tasks/swap.yaml
+# OOM safety net: allocate a swap file, persist it in fstab, and lower vm.swappiness.
+# Governing: OMG 2026-07-03 (ie01 oversubscription) — stumpcloud#16.
+# ie01 runs ~100 containers on 8c/24GB with zero swap; a memory spike OOM-kills a
+# container (lldap/caddy/postgres) instead of degrading. Swap turns a hard kill into
+# a graceful (if slower) degradation. Idempotent: skips allocation/mkswap/swapon when
+# the swap file already exists and is active.
+
+- name: Check whether the swap file already exists
+  ansible.builtin.stat:
+    path: "{{ host_swap_file }}"
+  register: _swap_file_stat
+  when: host_swap_enabled | bool
+
+- name: Allocate the swap file
+  ansible.builtin.command:
+    cmd: "fallocate -l {{ host_swap_size_mb }}M {{ host_swap_file }}"
+    creates: "{{ host_swap_file }}"
+  register: _swap_allocate
+  when:
+    - host_swap_enabled | bool
+    - not _swap_file_stat.stat.exists
+
+- name: Secure the swap file (root-only 0600)
+  ansible.builtin.file:
+    path: "{{ host_swap_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when:
+    - host_swap_enabled | bool
+    - _swap_allocate is defined and _swap_allocate is changed
+
+- name: Format the swap file
+  ansible.builtin.command:
+    cmd: "mkswap {{ host_swap_file }}"
+  when:
+    - host_swap_enabled | bool
+    - _swap_allocate is defined and _swap_allocate is changed
+
+- name: Persist the swap file in /etc/fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: "^{{ host_swap_file | regex_escape }}\\s"
+    line: "{{ host_swap_file }} none swap sw 0 0"
+    state: present
+  when: host_swap_enabled | bool
+
+- name: Check which swap devices are active
+  ansible.builtin.command: swapon --noheadings --show=NAME
+  register: _swap_active
+  changed_when: false
+  check_mode: false
+  when: host_swap_enabled | bool
+
+- name: Activate the swap file
+  ansible.builtin.command:
+    cmd: "swapon {{ host_swap_file }}"
+  when:
+    - host_swap_enabled | bool
+    - host_swap_file not in (_swap_active.stdout_lines | default([]))
+
+- name: Set vm.swappiness (favor RAM; swap only under real pressure)
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/60-swappiness.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by Ansible (roles/host swap.yaml). Governing: stumpcloud#16.
+      vm.swappiness = {{ host_swap_swappiness }}
+  register: _swappiness_conf
+  when: host_swap_enabled | bool
+
+- name: Apply vm.swappiness immediately
+  ansible.builtin.command:
+    cmd: "sysctl -w vm.swappiness={{ host_swap_swappiness }}"
+  changed_when: _swappiness_conf is changed
+  when: host_swap_enabled | bool

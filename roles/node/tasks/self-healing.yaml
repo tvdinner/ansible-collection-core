@@ -1,0 +1,90 @@
+---
+# roles/host/tasks/self-healing.yaml
+
+# --- SSH deploy key for git clone ---
+- name: Create root SSH directory
+  ansible.builtin.file:
+    path: /root/.ssh
+    state: directory
+    mode: "0700"
+
+- name: Install deploy key for ansible-pull
+  ansible.builtin.copy:
+    src: "~/.ssh/id_ansible"
+    dest: "{{ host_selfheal_ssh_key }}"
+    mode: "0600"
+    owner: root
+    group: root
+
+- name: Add Gitea host to known_hosts
+  ansible.builtin.known_hosts:
+    name: gitea.stump.rocks
+    key: "{{ lookup('pipe', 'ssh-keyscan -t ed25519 gitea.stump.rocks 2>/dev/null') }}"
+    path: /root/.ssh/known_hosts
+    state: present
+
+# --- Local repo clone ---
+- name: Create ansible-pull directory
+  ansible.builtin.file:
+    path: "{{ host_selfheal_repo_dir | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Clone or update home-cluster repo
+  ansible.builtin.git:
+    repo: "{{ host_selfheal_repo_url }}"
+    dest: "{{ host_selfheal_repo_dir }}"
+    version: "{{ host_selfheal_branch }}"
+    key_file: "{{ host_selfheal_ssh_key }}"
+    accept_hostkey: true
+    force: true
+
+# --- Install Ansible on target (system packages, not pipenv) ---
+- name: Install Ansible via APT
+  ansible.builtin.apt:
+    state: present
+    name:
+      - ansible
+      - ansible-core
+
+- name: Install Ansible Galaxy collections on target
+  ansible.builtin.command:
+    cmd: >
+      ansible-galaxy collection install
+        -r {{ host_selfheal_repo_dir }}/requirements.yml
+        --force
+    creates: /root/.ansible/collections
+
+# --- flock wrapper script ---
+- name: Install ansible-pull wrapper script
+  ansible.builtin.template:
+    src: ansible-pull-wrapper.sh.j2
+    dest: /usr/local/bin/ansible-converge
+    mode: "0755"
+
+# --- Cron job ---
+- name: Install daily cron job for ansible-pull
+  ansible.builtin.cron:
+    name: "ansible-converge"
+    hour: "{{ host_selfheal_cron_hour }}"
+    minute: "{{ host_selfheal_cron_minute }}"
+    job: "/usr/local/bin/ansible-converge"
+    user: root
+
+# --- Systemd boot unit ---
+- name: Install systemd boot service
+  ansible.builtin.template:
+    src: ansible-converge.service.j2
+    dest: /etc/systemd/system/ansible-converge.service
+    mode: "0644"
+  register: converge_unit
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: converge_unit.changed
+
+- name: Enable ansible-converge boot service
+  ansible.builtin.systemd:
+    name: ansible-converge
+    enabled: true

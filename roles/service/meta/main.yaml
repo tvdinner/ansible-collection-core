@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  author: joestump
+  namespace: tvdinner
+  description: Generic service deployment role for home-cluster
+  license: MIT
+  min_ansible_version: "2.14"
+
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+dependencies: []

@@ -1,0 +1,99 @@
+---
+# roles/base/tasks/server.yaml
+#
+# Governing: ADR-0049 (layered base configuration), ADR-0051 (Proxmox hosts take
+# the common layer), SPEC-0029 REQ "Server Layer Is Excluded From Desktop and
+# Proxmox Hosts".
+# Part of stumpcloud/stumpcloud#149, #155
+#
+# The SERVER layer: the headless guest fleet only. The import in
+# playbooks/base.yaml guards this on group membership; there is deliberately no
+# per-task `when` here, so the boundary is one condition in one place rather
+# than a rule that has to be re-remembered every time a task is added.
+#
+# Why each host class is kept out:
+#
+#   * DESKTOPS (kitt, tars, bender). The pip tasks below pin urllib3<2,
+#     requests<2.29.0 and cryptography<39 into /usr/lib/python3/dist-packages —
+#     system-wide, on a machine somebody uses. Removing the `ubuntu` user and
+#     purging unattended-upgrades are likewise server hygiene applied to a
+#     daily driver. This is the hazard ADR-0046 identified.
+#
+#   * PROXMOX NODES (lir, dagda, ogma, lotor, coran). PVE 8 is Debian 12 running
+#     python3.11, and PVE's own tooling uses that interpreter — dub.yaml already
+#     overrides ansible_python_interpreter per host for exactly this reason.
+#     Pinning libraries underneath it is the failure ADR-0021 was right to fear,
+#     even though its wider API-only claim did not survive (ADR-0051).
+#
+# NOTE on scope: `pip --target /usr/lib/python3/dist-packages` is NOT itself the
+# thing that makes this layer unsafe — playbooks/docker.yaml already installs the
+# Docker SDK the same way onto the same desktops. The distinguishing hazard is
+# the DOWNGRADE PINS. Whether they are still needed at all is an open question
+# (docker.yaml installs newer versions over the top on the same hosts); they are
+# moved here verbatim rather than re-litigated.
+
+- name: Remove the default 'ubuntu' user
+  ansible.builtin.user:
+    name: ubuntu
+    state: absent
+    remove: true
+
+- name: Disable unattended upgrades
+  ansible.builtin.apt:
+    state: absent
+    purge: true
+    name:
+      - unattended-upgrades
+
+# python3-pip is a server package because the only thing that needs it here is
+# the pip block below. Desktops still get it from playbooks/docker.yaml.
+- name: Install server APT packages
+  ansible.builtin.apt:
+    state: present
+    name: "{{ base_server_packages }}"
+
+# NOT a universal host concern, despite looking like one. Check mode on bender
+# reported 194 packages queued for removal — pop-shell, pop-desktop-widget,
+# pop-gnome-shell-theme, pop-shop, mutter-common, libwebkit2gtk — i.e. autoremove
+# would have stripped the Pop!_OS desktop off an interactive workstation. kitt
+# showed real removals too. The headless fleet is unaffected: ie01 simulates to
+# "0 to remove", which is exactly why this looked safe to put in `common`.
+- name: Remove dependencies that are no longer required
+  ansible.builtin.apt:
+    autoremove: true
+
+- name: Install LSB packages
+  ansible.builtin.apt:
+    state: present
+    name:
+      - lsb-release
+      - lsb-core
+  # `is defined` guard: an unreachable host (playbooks/base.yaml's
+  # ignore_unreachable) never gets Gathering Facts, so ansible_distribution_release
+  # is undefined for it — a bare `!=` against an undefined value is a hard task
+  # FAILURE, not an ignored UNREACHABLE, and reintroduces the shard-wide cascade
+  # ignore_unreachable exists to prevent. Same class of bug as the Route53 task
+  # in ../common.yaml.
+  when: ansible_distribution_release is defined and ansible_distribution_release != 'noble'
+
+# Deliberately NOT upgrading pip itself. `pip install -U --target
+# /usr/lib/python3/dist-packages pip` writes a pip-installed pip over the
+# distro's, mixing the two vendored dependency trees — on lake01/lake02 that
+# left `pip._vendor.resolvelib` half-upgraded and every later pip invocation
+# died with `cannot import name 'RequirementInformation'`, which took the whole
+# dtw converge-base shard down. The distro pip is fine; package installs below
+# do not need a newer one.
+
+- name: Update Python PIP packages to correct versions
+  ansible.builtin.pip:
+    executable: pip3
+    name: "{{ base_pip_pinned }}"
+    state: latest
+    extra_args: --target /usr/lib/python3/dist-packages
+
+- name: Install necessary Python packages
+  ansible.builtin.pip:
+    executable: pip3
+    name: "{{ base_pip_packages }}"
+    state: present
+    extra_args: --target /usr/lib/python3/dist-packages

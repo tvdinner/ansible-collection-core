@@ -1,0 +1,12 @@
+{# Managed by Ansible (roles/host edge-hardening.yaml) -- do not edit. #}
+{# Governing: ADR-0044, ADR-0013. Whitelist StumpCloud's trusted mesh/LAN #}
+{# CIDRs so CrowdSec never issues a decision against internal sources — a #}
+{# fumbled login from the WG mesh must never ban us out of the edge host.  #}
+name: stumpcloud/trusted-cidrs
+description: "Whitelist StumpCloud trusted mesh/LAN CIDRs"
+whitelist:
+  reason: "StumpCloud trusted networks (loopback + WireGuard mesh + services LAN)"
+  cidr:
+{% for cidr in host_edge_trusted_cidrs %}
+    - "{{ cidr }}"
+{% endfor %}

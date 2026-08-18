@@ -1,0 +1,115 @@
+---
+# roles/node/tasks/main.yaml (extracted from stumpcloud/ansible roles/host)
+#
+# Governing: ADR-0002 (host node role with self-healing), ADR-0049 (layered base
+# configuration).
+# Part of stumpcloud/stumpcloud#155; extraction tracked in stumpcloud/stumpcloud#265.
+#
+# Node provisioning, in order. Each step is an include named for what it DOES,
+# and tagged so it can be run or skipped on its own.
+#
+# The steps used to be numbered files (stage-0-proxmox, stage-1-base, stage-3b-
+# storage …). The numbering encoded ordering that the file order already
+# expresses, and it drifted the moment anything was inserted — hence 1b, 3b, 3c,
+# 5c. Worse, `stage-1-base` was a second, unguarded copy of the base layer, so a
+# host bootstrapped or self-healed here got different configuration from one
+# converged through playbooks/base.yaml. Both now include the base role, which is
+# the single definition of birthright automation.
+#
+# NOTE: the Proxmox VM provisioning stage was NOT extracted. It was the only
+# stage that managed the hypervisor rather than the node, and community.proxmox
+# supersedes it (see the epic). VM provisioning stays in stumpcloud/ansible
+# until that cutover.
+
+- name: Gather facts
+  ansible.builtin.setup:
+  tags: [always]
+
+# Birthright automation — the common/server layers and the host-class guard
+# between them. Shared with playbooks/base.yaml so bootstrap, self-heal and
+# converge cannot diverge again.
+- name: Base configuration
+  ansible.builtin.include_role:
+    name: tvdinner.core.base
+    apply:
+      tags: [base]
+  tags: [base]
+
+- name: Swap file (OOM safety net)
+  ansible.builtin.include_tasks:
+    file: swap.yaml
+    apply:
+      tags: [swap]
+  tags: [swap]
+
+- name: Users, groups, and credentials
+  ansible.builtin.include_tasks:
+    file: users.yaml
+    apply:
+      tags: [users]
+  tags: [users]
+
+# Governing: ADR-0002. Docker-less hosts (e.g. the internet-exposed Infomaniak
+# VPS `cloud01`) set host_docker_enabled: false so neither a manual run nor the
+# nightly ansible-converge self-heal reinstalls Docker/Caddy/baseline. Defaults
+# to true — unchanged for all existing hosts.
+- name: Docker engine
+  ansible.builtin.include_tasks:
+    file: docker.yaml
+    apply:
+      tags: [docker]
+  when: host_docker_enabled | default(true)
+  tags: [docker]
+
+- name: Storage (ZFS pool, ZED alerts, node_exporter)
+  ansible.builtin.include_tasks:
+    file: storage.yaml
+    apply:
+      tags: [storage]
+  tags: [storage]
+
+# Governing: ADR-0041 (host-level WireGuard). Docker-independent — runs on
+# Docker-less hosts too — so it is NOT guarded by host_docker_enabled. Gated on
+# host_wireguard.enabled (default false), so it is a no-op for existing hosts.
+- name: WireGuard (host-level wg-quick)
+  ansible.builtin.include_tasks:
+    file: wireguard.yaml
+    apply:
+      tags: [wireguard]
+  when: host_wireguard.enabled | default(false)
+  tags: [wireguard]
+
+- name: Caddy reverse proxy
+  ansible.builtin.include_tasks:
+    file: caddy.yaml
+    apply:
+      tags: [caddy]
+  when: host_docker_enabled | default(true)  # Caddy runs as a container (ADR-0016)
+  tags: [caddy]
+
+- name: Baseline services
+  ansible.builtin.include_tasks:
+    file: baseline-services.yaml
+    apply:
+      tags: [baseline]
+  when: host_docker_enabled | default(true)  # Dozzle/Beszel/WUD are containers
+  tags: [baseline]
+
+# Governing: ADR-0044 (public edge posture), ADR-0013 (CrowdSec). Host-level
+# hardening (fail2ban + CrowdSec + nftables firewall bouncer) for internet-
+# exposed hosts. Docker-independent; gated on host_edge_mode (default false), so
+# it is a no-op for every LAN host and only runs on cloud01.
+- name: Edge hardening (fail2ban + CrowdSec)
+  ansible.builtin.include_tasks:
+    file: edge-hardening.yaml
+    apply:
+      tags: [edge, hardening]
+  when: host_edge_mode | default(false)
+  tags: [edge, hardening]
+
+- name: Self-healing (ansible-pull)
+  ansible.builtin.include_tasks:
+    file: self-healing.yaml
+    apply:
+      tags: [selfheal]
+  tags: [selfheal]

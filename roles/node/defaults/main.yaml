@@ -1,0 +1,178 @@
+---
+# roles/host/defaults/main.yaml
+
+# --- VM provisioning (Proxmox) ---
+host_proxmox_enabled: "{{ proxmox is defined and proxmox.api_url is defined }}"
+host_proxmox_api_url: "https://{{ proxmox.api_url | default('') }}:8006"
+host_proxmox_api_token_id: "{{ proxmox.api_token_id | default('') }}"
+host_proxmox_api_token_secret: "{{ proxmox.api_token_secret | default('') }}"
+host_proxmox_node: "{{ proxmox.node | default('pve') }}"
+host_proxmox_storage: "{{ proxmox.storage | default('local-lvm') }}"
+host_proxmox_network_bridge: "{{ proxmox.network_bridge | default('vmbr0') }}"
+
+# Per-host VM specs (overridden in inventory)
+host_vm_vmid: "{{ vm.vmid | default(omit) }}"
+host_vm_cores: "{{ vm.cores | default(4) }}"
+host_vm_memory: "{{ vm.memory | default(8192) }}"
+host_vm_disk_size: "{{ vm.disk_size | default('100G') }}"
+host_vm_template: "{{ vm.template | default('ubuntu-24.04-cloud') }}"
+host_vm_ip: "{{ vm.ip | default(omit) }}"
+host_vm_gateway: "{{ vm.gateway | default(omit) }}"
+host_vm_nameserver: "{{ vm.nameserver | default('1.1.1.1') }}"
+host_vm_searchdomain: "{{ vm.searchdomain | default('stump.rocks') }}"
+host_vm_sshkeys: "{{ vm.sshkeys | default('') }}"
+# Governing: ADR-0020 (disk passthrough)
+# List of dicts mapping SCSI slots to host device paths, e.g.:
+#   - scsi1: /dev/sda
+#   - scsi2: /dev/sdb
+host_vm_passthrough_disks: "{{ vm.passthrough_disks | default([]) }}"
+
+# Cloud-init configuration
+# The Proxmox VM template must be an Ubuntu cloud image with cloud-init support.
+# cloud-init handles the "bare metal to SSH-ready" gap before Ansible can connect.
+host_cloudinit_user: joestump
+host_cloudinit_password: ""
+host_cloudinit_ssh_public_key: "{{ lookup('file', '~/.ssh/id_ansible.pub') }}"
+# When true, cloud-init user-data will run an initial ansible-pull on first boot,
+# making the handoff from "bare VM" to "fully Ansible-managed" completely hands-free.
+host_cloudinit_bootstrap_ansible: true
+
+# --- Base configuration ---
+# Deliberately empty. The base layer — its packages, pip pins, host_mtu and the
+# desktop/proxmox guard — lives in roles/base, which this role includes and
+# playbooks/base.yaml also uses. Adding a knob back here would recreate the
+# divergence stumpcloud/stumpcloud#155 removed.
+
+# --- Swap (OOM safety net) ---
+# Governing: OMG 2026-07-03 (ie01 oversubscription) — stumpcloud#16.
+# ie01 runs ~100 containers on 8c/24GB with zero swap: a memory spike OOM-kills a
+# container instead of degrading. A swap file makes the host degrade gracefully.
+host_swap_enabled: true
+# Swap file path. A file (not a partition) keeps this host-agnostic and resizable.
+host_swap_file: /swapfile
+# RAM-derived OOM cushion: half of RAM, clamped to [2 GiB, 8 GiB]. Gives 24 GB hosts
+# 8 GiB (the proven ie01 cushion) and 3.8 GB Raspberry Pis ~2 GiB, without hand-tuning
+# per host. Overridable per host/group. round(RAM/2) then min(max(...,2048),8192).
+host_swap_size_mb: "{{ [[ (ansible_memtotal_mb / 2) | round | int, 2048 ] | max, 8192 ] | min }}"
+# Favor RAM; only reach for swap under real pressure (default is 60).
+host_swap_swappiness: 10
+
+# --- Users ---
+host_groups:
+  - { name: builtin_administrators, gid: 544 }
+  - { name: builtin_users, gid: 545 }
+  - { name: services, gid: 80 }
+  - { name: media, gid: 3001 }
+  - { name: photos, gid: 3002 }
+  - { name: scanner, gid: 3004 }
+  - { name: monitoring, gid: 4050 }
+
+host_service_users:
+  - { name: media, uid: 3000, group: media }
+  - { name: scanner, uid: 3001, group: scanner }
+  - { name: photos, uid: 4000, group: media }
+  - { name: monitoring, uid: 4050, group: monitoring }
+
+host_admin_user: "{{ lookup('env', 'USER') }}"
+host_ssh_keys:
+  - id_rsa
+  - id_ansible
+host_upload_private_ssh_key: false
+
+# --- Storage (ZFS) ---
+# host_zfs_pool.name must be set to enable ZFS setup. All other keys are optional.
+# Example:
+#   host_zfs_pool:
+#     name: tank
+#     type: raidz1
+#     mountpoint: /tank
+#     disks:
+#       - /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi1
+#       - /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi2
+#       - /dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi4
+host_zfs_pool: {}
+host_zfs_datasets: []
+host_zfs_quotas: {}
+host_zfs_zed_email: ""
+host_node_exporter_enabled: false
+host_node_exporter_image: "prom/node-exporter:latest"
+
+# --- WireGuard (host-level wg-quick) ---
+# Attach a host to a WireGuard peer via a systemd wg-quick@<iface> unit (no
+# container). Set host_wireguard.enabled: true and provide interface/address/
+# private_key (Vault)/peer to enable. Default off = no-op for existing hosts.
+# Governing: ADR-0041.
+host_wireguard:
+  enabled: false
+
+# --- Docker ---
+# When false, the Docker, Caddy and baseline-services steps are
+# skipped entirely — for internet-exposed hosts that must not run Docker.
+# Governing: ADR-0002 (host bootstrap pipeline), ADR-0016 (Caddy needs Docker).
+host_docker_enabled: true
+# --- Edge/public host hardening (ADR-0044, SPEC-0025) ---
+# Set true ONLY on internet-exposed hosts attached to the mesh (e.g. cloud01). It
+# makes the Docker daemon config edge-safe: NO tcp://0.0.0.0:2375 control-plane, and
+# any unspecified published port binds the WireGuard mesh IP (host_wireguard.address)
+# instead of 0.0.0.0. LAN/DUB hosts leave this false — their daemon.json is unchanged
+# (the tcp:2375 bind is load-bearing for docker_hosts monitoring). host_edge: true
+# MUST land together with the nftables edge baseline and MUST NOT precede it.
+# Governing: ADR-0044, SPEC-0025 REQ "Host-Conditional Docker Daemon Binding".
+host_edge: false
+host_docker_pin: true
+# Set to 'latest' to upgrade Docker packages (e.g. -e host_docker_state=latest)
+host_docker_state: present
+
+# --- Caddy ---
+host_caddy_image: "{{ caddy.image | default('ghcr.io/joestump/caddy:latest') }}"
+host_caddy_platform: "{{ caddy.platform | default('linux/amd64') }}"
+host_caddy_dns_aliases: "{{ caddy.dns_aliases | default([]) }}"
+
+# --- Baseline ---
+# The Beszel agent is deployed by playbooks/services/monitoring.yaml (the
+# single, canonical definition), so baseline-services carries no agent key any more.
+# WUD is deployed on all docker hosts
+host_wud_enabled: true
+host_wud_image: "getwud/wud"
+host_wud_port: 3000
+
+# --- Edge hardening (internet-exposed hosts only) ---
+# Governing: ADR-0044 (public edge posture), ADR-0013 (CrowdSec).
+# When true, installs fail2ban (sshd) + CrowdSec engine + nftables firewall
+# bouncer on the host. Only internet-exposed hosts (cloud01) set this; default
+# off = a no-op for every LAN host.
+host_edge_mode: false
+# Never ban these — loopback + WireGuard mesh + StumpCloud services LAN. Applied
+# to BOTH fail2ban (ignoreip) and CrowdSec (whitelist parser) so a fumbled login
+# from the mesh can never lock us out of the edge host.
+host_edge_trusted_cidrs:
+  - 127.0.0.1/8
+  - ::1/128
+  - 192.168.9.0/24      # WireGuard mesh
+  - 192.168.100.0/24    # StumpCloud services LAN
+host_fail2ban_enabled: true
+host_fail2ban_bantime: 1h
+host_fail2ban_findtime: 10m
+host_fail2ban_maxretry: 5
+host_crowdsec_enabled: true
+# Hub collections: SSH brute-force detection + baseline Linux scenarios. Mesh/LAN
+# whitelisting is handled by the custom trusted-cidrs parser below (the community
+# crowdsecurity/whitelists is a parser, not a collection, and is redundant with
+# it). HTTP/Caddy scenarios are added with the switchboard adoption (needs Caddy
+# JSON access logs wired to the acquisition config).
+host_crowdsec_collections:
+  - crowdsecurity/sshd
+  - crowdsecurity/linux
+
+# --- Self-healing (ansible-pull) ---
+host_selfheal_repo_url: "git@gitea.stump.rocks:stumpcloud/ansible.git"
+host_selfheal_repo_dir: /opt/ansible/home-cluster
+host_selfheal_branch: main
+host_selfheal_playbook: playbooks/host.yaml
+# Governing: ADR-0019 (site-based inventory) — each site sets selfheal_inventory in its vars
+host_selfheal_inventory: "{{ selfheal_inventory | default('dub.yaml') }}"
+host_selfheal_cron_hour: "3"
+host_selfheal_cron_minute: "30"
+host_selfheal_ssh_key: /root/.ssh/id_ansible
+host_selfheal_log_file: /var/log/ansible-converge.log
+host_selfheal_lock_file: /var/lock/ansible-converge.lock

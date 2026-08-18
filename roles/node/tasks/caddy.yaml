@@ -1,0 +1,91 @@
+---
+# roles/host/tasks/caddy.yaml
+
+- name: Create Caddy network
+  community.docker.docker_network:
+    name: caddy
+
+# Persist Caddy's cert/state store on the same bind mount the service role uses
+# ({{ paths.local }}/caddy/data) so a later service redeploy never switches the
+# volume out from under the cert store. See ADR — caddy cert-store consistency.
+- name: Ensure Caddy data directory exists
+  ansible.builtin.file:
+    path: "{{ paths.local }}/caddy/data"
+    state: directory
+    mode: "0700"
+
+# The Caddy container bakes aws.letsencrypt.* into its environment at create
+# time. Nothing ever compared the running container's key against the source
+# of truth, so when the certbot key was deactivated on 2026-08-03 every
+# pre-existing container kept the dead key — and kept failing DNS-01 —
+# invisibly, until a cert actually expired. Assert they match before deploy
+# so the next rotation fails loudly instead of silently.
+# See stumpcloud/stumpcloud#236.
+- name: Read running Caddy container AWS key
+  ansible.builtin.command: >-
+    docker inspect caddy --format
+    '{{ "{{range .Config.Env}}{{ println . }}{{ end }}" }}'
+  register: caddy_container_env
+  changed_when: false
+  failed_when: false
+  check_mode: ignore
+
+- name: Fail converge when the running Caddy AWS key is stale
+  ansible.builtin.fail:
+    msg: >-
+      Running Caddy container holds AWS_ACCESS_KEY_ID={{
+        (caddy_container_env.stdout_lines
+          | select('match', '^AWS_ACCESS_KEY_ID=')
+          | map('replace', 'AWS_ACCESS_KEY_ID=', '')
+          | first
+        ) | default('<none>')
+      }} but secret/shared/aws has {{
+        aws.letsencrypt.access_key_id
+      }}. Recreate the container to pick up the rotated key:
+      a docker restart is NOT enough (env is baked at create time).
+  when: >-
+    caddy_container_env.rc == 0
+    and (caddy_container_env.stdout_lines
+      | select('match', '^AWS_ACCESS_KEY_ID=')
+      | map('replace', 'AWS_ACCESS_KEY_ID=', '')
+      | first
+      | default(''))
+      != aws.letsencrypt.access_key_id
+
+- name: Deploy Caddy container
+  community.docker.docker_compose_v2:
+    state: present
+    project_name: caddy
+    definition:
+      services:
+        caddy:
+          image: "{{ host_caddy_image }}"
+          platform: "{{ host_caddy_platform }}"
+          container_name: caddy
+          labels:
+            homepage.group: "{{ inventory_hostname }}"
+            homepage.name: "Caddy on {{ inventory_hostname }}"
+            homepage.icon: caddy
+            homepage.description: "Proxy on {{ inventory_hostname }}"
+            homepage.weight: "70"
+            caddy.acme_dns: route53
+            caddy.servers.protocols: h1 h2
+          ports:
+            - "80:80"
+            - "443:443"
+          environment:
+            CADDY_INGRESS_NETWORKS: caddy
+            AWS_ACCESS_KEY_ID: "{{ aws.letsencrypt.access_key_id }}"
+            AWS_SECRET_ACCESS_KEY: "{{ aws.letsencrypt.secret_access_key }}"
+            AWS_REGION: us-east-1
+            AWS_DEFAULT_REGION: us-east-1
+          networks:
+            caddy:
+              aliases: "{{ host_caddy_dns_aliases }}"
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - "{{ paths.local }}/caddy/data:/data"
+          restart: unless-stopped
+      networks:
+        caddy:
+          external: true

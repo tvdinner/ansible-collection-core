@@ -1,0 +1,160 @@
+---
+# roles/host/tasks/edge-hardening.yaml
+#
+# Governing: ADR-0044 (Docker-over-WireGuard + host Caddy — public edge posture),
+# ADR-0013 (CrowdSec for network threat detection).
+#
+# Host-level hardening for internet-exposed edge hosts (cloud01). Runs only when
+# host_edge_mode: true, so it is a no-op for every LAN host. Installs, in order:
+#   1. fail2ban            — sshd jail, nftables banaction (SSH brute-force layer)
+#   2. CrowdSec engine      — bare-metal LAPI+agent, community blocklists, ssh-bf
+#   3. firewall bouncer     — nftables enforcement of CrowdSec decisions
+#
+# Self-contained on the host: CrowdSec's LAPI is local (127.0.0.1:8081 — 8080 is
+# taken by the switchboard app), so enforcement never depends on the WG path to
+# ie01's LAPI. Trusted CIDRs (loopback + WG mesh + services LAN) are whitelisted
+# in BOTH fail2ban and CrowdSec so we can never self-lock SSH from the mesh.
+
+# ----------------------------------------------------------------------------
+# fail2ban
+# ----------------------------------------------------------------------------
+- name: Install fail2ban
+  ansible.builtin.apt:
+    name: fail2ban
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  when: host_fail2ban_enabled
+
+- name: Configure fail2ban jail (sshd)
+  ansible.builtin.template:
+    src: fail2ban-jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: "0644"
+  register: _f2b_jail
+  when: host_fail2ban_enabled
+
+- name: Enable and (re)start fail2ban
+  ansible.builtin.service:
+    name: fail2ban
+    enabled: true
+    state: "{{ 'restarted' if _f2b_jail.changed else 'started' }}"
+  when: host_fail2ban_enabled
+
+# ----------------------------------------------------------------------------
+# CrowdSec engine (bare-metal) — must be installed & running BEFORE the bouncer
+# so the bouncer's postinst can auto-register its API key against the local LAPI.
+# ----------------------------------------------------------------------------
+- name: Add CrowdSec APT signing key
+  ansible.builtin.apt_key:
+    url: https://packagecloud.io/crowdsec/crowdsec/gpgkey
+    keyring: /etc/apt/keyrings/crowdsec.gpg
+    state: present
+  when: host_crowdsec_enabled
+
+- name: Add CrowdSec APT repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/crowdsec.gpg] https://packagecloud.io/crowdsec/crowdsec/ubuntu {{ ansible_distribution_release }} main"
+    filename: crowdsec
+    state: present
+    update_cache: true
+  when: host_crowdsec_enabled
+
+- name: Install CrowdSec engine
+  ansible.builtin.apt:
+    name: crowdsec
+    state: present
+  register: _crowdsec_pkg
+  when: host_crowdsec_enabled
+
+# The default LAPI listen_uri is 127.0.0.1:8080, which collides with the
+# switchboard app (127.0.0.1:8080). Move it to :8081 before first start.
+- name: Pin CrowdSec LAPI to 127.0.0.1:8081 (avoid switchboard :8080 clash)
+  ansible.builtin.replace:
+    path: /etc/crowdsec/config.yaml
+    regexp: '^(\s*listen_uri:\s*).*$'
+    replace: '\g<1>127.0.0.1:8081'
+  register: _crowdsec_lapi_port
+  when: host_crowdsec_enabled
+
+- name: Point local agent credentials at the relocated LAPI
+  ansible.builtin.replace:
+    path: /etc/crowdsec/local_api_credentials.yaml
+    regexp: '^(url:\s*).*$'
+    replace: '\g<1>http://127.0.0.1:8081'
+  register: _crowdsec_agent_creds
+  when: host_crowdsec_enabled
+
+- name: Enable and start CrowdSec
+  ansible.builtin.service:
+    name: crowdsec
+    enabled: true
+    state: "{{ 'restarted' if (_crowdsec_lapi_port.changed or _crowdsec_agent_creds.changed) else 'started' }}"
+  when: host_crowdsec_enabled
+
+- name: Wait for CrowdSec LAPI to be ready
+  ansible.builtin.command: cscli lapi status
+  register: _cscli_lapi
+  retries: 6
+  delay: 5
+  until: _cscli_lapi.rc == 0
+  changed_when: false
+  when: host_crowdsec_enabled
+
+- name: Install CrowdSec collections (ssh-bf, baseline linux)
+  ansible.builtin.command: "cscli collections install {{ item }}"
+  loop: "{{ host_crowdsec_collections }}"
+  register: _cscli_coll
+  # cscli prints "Nothing to install or remove." when the collection is already
+  # present — keep the nightly self-heal converge quiet by treating that as ok.
+  changed_when: "'Nothing to install or remove' not in (_cscli_coll.stdout | default(''))"
+  failed_when: _cscli_coll.rc != 0
+  when: host_crowdsec_enabled
+
+# Whitelist mesh/LAN CIDRs so a fumbled login from the WG mesh is never banned.
+- name: Whitelist trusted CIDRs in CrowdSec
+  ansible.builtin.template:
+    src: crowdsec-trusted-whitelist.yaml.j2
+    dest: /etc/crowdsec/parsers/s02-enrich/trusted-cidrs.yaml
+    owner: root
+    group: root
+    mode: "0644"
+  register: _crowdsec_whitelist
+  when: host_crowdsec_enabled
+
+- name: Reload CrowdSec after parser/collection changes
+  ansible.builtin.service:
+    name: crowdsec
+    state: reloaded
+  when:
+    - host_crowdsec_enabled
+    - (_cscli_coll is changed) or (_crowdsec_whitelist is changed)
+
+# ----------------------------------------------------------------------------
+# CrowdSec firewall bouncer (nftables) — enforcement layer.
+# The -nftables package's postinst auto-registers a bouncer against the local
+# LAPI and drops banned IPs in its own nft table (independent of Docker's rules).
+# ----------------------------------------------------------------------------
+- name: Install CrowdSec nftables firewall bouncer
+  ansible.builtin.apt:
+    name: crowdsec-firewall-bouncer-nftables
+    state: present
+  register: _crowdsec_bouncer_pkg
+  when: host_crowdsec_enabled
+
+- name: Ensure firewall bouncer points at the relocated LAPI (127.0.0.1:8081)
+  ansible.builtin.replace:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    regexp: '^(\s*api_url:\s*).*$'
+    replace: '\g<1>http://127.0.0.1:8081/'
+  register: _crowdsec_bouncer_url
+  when: host_crowdsec_enabled
+
+- name: Enable and start the firewall bouncer
+  ansible.builtin.service:
+    name: crowdsec-firewall-bouncer
+    enabled: true
+    state: "{{ 'restarted' if (_crowdsec_bouncer_pkg.changed or _crowdsec_bouncer_url.changed) else 'started' }}"
+  when: host_crowdsec_enabled

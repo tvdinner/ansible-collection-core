@@ -1,0 +1,121 @@
+---
+# roles/base/defaults/main.yaml
+#
+# Governing: ADR-0049 (layered base configuration), ADR-0051 (Proxmox hosts take
+# the common layer), ADR-0002 (host bootstrap), SPEC-0029.
+#
+# Birthright automation: what a machine gets for being a managed host at all.
+# There is exactly ONE definition of it, and both entry points use this role —
+# playbooks/base.yaml (operator + CI converge) and roles/host (bootstrap and the
+# ansible-pull self-heal). They used to be two divergent copies; see
+# stumpcloud/stumpcloud#155.
+
+
+# --- common layer: every managed host ---
+#
+# The bar for this list: a tool that is useful on a headless guest, an
+# interactive desktop AND a hypervisor. Anything that exists to serve a
+# *workload* belongs in base_server_packages.
+base_common_packages:
+  - vim
+  - curl
+  - ca-certificates
+  - gnupg
+  - traceroute
+  - iperf3
+  - wireguard-tools
+  - git
+  - jq
+  - smartmontools
+
+# --- server layer: the headless guest fleet only ---
+base_server_packages:
+  - nfs-common
+  - python3-pip
+  - davfs2
+  - unp
+  - unrar
+  - python3-psycopg2
+  - postgresql-client
+  - sqlite3
+  # Cross-arch emulation for multi-arch container builds — a Docker concern,
+  # not a host one, so it stays out of the common layer.
+  - qemu-user-static
+  - binfmt-support
+
+# Version-pinned Python packages, installed into the system interpreter.
+#
+# This is the single most desktop- and hypervisor-hostile thing the fleet does,
+# and the reason the server layer is guarded at all. See stumpcloud/stumpcloud#157
+# for whether these pins still earn their keep — they are moved here verbatim
+# rather than re-litigated as part of a structural change.
+base_pip_pinned:
+  - "urllib3<2"
+  - "requests<2.29.0"
+  - "cryptography<39"
+  - pyOpenSSL
+  - PyYAML
+  - PyMySQL
+
+base_pip_packages:
+  - wheel
+  - boto3
+  - botocore
+  - packaging
+
+# Optional interface MTU. Leave null on normal hosts (no-op). Set it on links
+# with a reduced path MTU — e.g. Infomaniak VPS uplinks run 1492 (gva.yaml sets
+# it for cloud01), so 1500-byte packets black-hole and SSH/TLS hang mid-handshake.
+#
+# This MUST stay a real YAML null, not "{{ something | default(none) }}": Jinja
+# renders that to the STRING "None"/"", so `is not none` is True and the drop-in
+# gets written on every host with `mtu: None`. Check mode caught exactly that.
+host_mtu: null
+
+# --- unattended security updates ---
+#
+# Governing: ADR-0051 (a hypervisor's package state belongs to Proxmox).
+#
+# On by default, because the failure this fixes is silent: before this, no host
+# in the fleet had unattended-upgrades installed, and the hypervisors have no
+# ansible-pull self-heal, so they were patched only when an operator happened to
+# run a converge.
+base_unattended_enabled: true
+
+# Debian security ONLY, and the omission of the Proxmox repo is load-bearing
+# rather than an oversight. PVE packages are served from download.proxmox.com,
+# so they never match these patterns and can never be picked up unattended —
+# which is how ADR-0051 survives without anyone maintaining a denylist. It also
+# keeps proxmox-kernel-* out, so a node cannot silently acquire a pending reboot
+# from a kernel nobody chose to install.
+base_unattended_origins:
+  - "origin=Debian,codename=${distro_codename},label=Debian-Security"
+  - "origin=Debian,codename=${distro_codename}-security,label=Debian-Security"
+
+# For holding back a *Debian* package. PVE packages do not belong here: they are
+# already excluded by origin, and listing them would imply the origins alone are
+# not sufficient.
+base_unattended_blacklist: []
+
+# Rebooting is deliberate fleet policy: these are a personal cloud, guests all
+# carry onboot=1, and an unapplied kernel/libc fix is worse than a 90-second
+# outage at 03:00 local.
+#
+# Per-host overrides exist for the hosts where 03:00 is NOT quiet — see coran in
+# dtw.yaml, which runs PBS for the whole fleet.
+base_unattended_reboot: true
+base_unattended_reboot_time: "03:00"
+
+# --- rack-hud collector identity (ADR-0050, SPEC-0030) ---
+#
+# The collector user is the account rack-hud SSHes in as — root on the Proxmox
+# nodes and tars, joestump elsewhere — which ansible_ssh_user already names on
+# every host, so there are no per-host overrides to drift.
+rack_hud_vault_path: shared/rack-hud
+# No fallback chain. ansible_ssh_user is set for every host in every inventory,
+# and a silent `| default('root')` would authorize the collector against root on
+# a host where the variable was merely forgotten — failing loudly is correct for
+# something that decides which account gets an SSH key.
+rack_hud_collector_user: "{{ ansible_ssh_user }}"
+_rack_hud_ssh_dir: "{{ ansible_facts.getent_passwd[rack_hud_collector_user][4] }}/.ssh"
+_rack_hud_authorized_keys: "{{ _rack_hud_ssh_dir }}/authorized_keys"

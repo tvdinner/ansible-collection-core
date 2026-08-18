@@ -1,0 +1,141 @@
+---
+# roles/host/tasks/docker.yaml
+
+- name: Uninstall legacy Docker packages
+  ansible.builtin.apt:
+    state: absent
+    name:
+      - docker
+      - docker-engine
+      - docker.io
+      - containerd
+      - runc
+
+- name: Remove Docker Snap package
+  community.general.snap:
+    name: docker
+    state: absent
+
+- name: Install Docker APT key
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+
+- name: Add Docker APT repository
+  ansible.builtin.apt_repository:
+    repo: "deb https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    filename: docker
+    state: present
+    update_cache: true
+
+- name: Unpin Docker packages for upgrade
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: install
+  loop:
+    - docker-ce
+    - docker-ce-cli
+  when: host_docker_state == 'latest'
+  ignore_errors: true
+
+- name: Update APT cache
+  ansible.builtin.apt:
+    update_cache: true
+  ignore_errors: true
+
+- name: Install/upgrade Docker packages
+  ansible.builtin.apt:
+    allow_downgrade: true
+    state: "{{ host_docker_state }}"
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+  register: docker_packages
+
+- name: Pin Docker packages
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - docker-ce
+    - docker-ce-cli
+  when: host_docker_pin
+
+# Governing: ADR-0049, SPEC-0029 REQ "`/volumes` Is Created By The Docker Path".
+#
+# playbooks/docker.yaml creates paths.local, but roles/host has its OWN docker
+# tasks and never invokes that playbook — so bootstrap and ansible-pull would
+# leave /volumes to be created implicitly, as a parent of the Caddy data dir,
+# inheriting root's umask instead of an explicit mode. On a host with
+# host_docker_enabled false it would not be created at all.
+- name: Create the service data root
+  ansible.builtin.file:
+    path: "{{ paths.local }}"
+    state: directory
+    mode: "0755"
+
+# python3-pip moved to the base SERVER layer with the rest of the pip machinery,
+# so a desktop no longer gets it from there — but this task still needs it.
+# Installing it beside its consumer keeps the Docker path self-contained.
+- name: Ensure pip is present for the Docker SDK
+  ansible.builtin.apt:
+    state: present
+    name: python3-pip
+
+- name: Install Docker Python SDK
+  ansible.builtin.pip:
+    name:
+      - "cython<3.0.0"
+      - "docker==6.1.3"
+      - docker-compose
+    state: latest
+    extra_args: --no-build-isolation --target /usr/lib/python3/dist-packages
+
+- name: Create systemd override directory for Docker
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+
+- name: Configure Docker systemd override
+  ansible.builtin.template:
+    src: ../../playbooks/files/docker/override.conf.j2
+    dest: /etc/systemd/system/docker.service.d/override.conf
+  register: docker_override_conf
+
+- name: Configure Docker daemon
+  ansible.builtin.template:
+    src: ../../playbooks/files/docker/daemon.json.j2
+    dest: /etc/docker/daemon.json
+  register: docker_daemon_conf
+
+# Every container log-watcher (Dozzle, Falco, compose, AdGuard's hosts watcher…)
+# consumes an inotify instance; the kernel default of 128 per user is exhausted
+# on hosts running ~100 containers, and late-starting containers then crash-loop
+# with "too many open files" (2026-08-05: adguard-ie01 after an ie01 reboot).
+- name: Raise inotify instance limit for container-dense hosts
+  ansible.posix.sysctl:
+    name: fs.inotify.max_user_instances
+    value: "512"
+    sysctl_file: /etc/sysctl.d/99-inotify.conf
+    sysctl_set: true
+    state: present
+    reload: true
+
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when: docker_packages.changed or docker_override_conf.changed or docker_daemon_conf.changed
+
+- name: Restart Docker daemon
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+  when: docker_packages.changed or docker_override_conf.changed or docker_daemon_conf.changed
+
+- name: Ensure Docker is running
+  ansible.builtin.service:
+    name: docker
+    state: started

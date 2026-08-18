@@ -5,5 +5,12 @@ rules:
   document-start: disable
   truthy:
     check-keys: false
+  braces:
+    max-spaces-inside: 1
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  indentation:
+    indent-sequences: consistent
 ignore: |
   build/

@@ -1,0 +1,86 @@
+---
+# roles/host/tasks/users.yaml
+
+# --- Service groups and users ---
+- name: Create service groups
+  ansible.builtin.group:
+    state: present
+    name: "{{ item.name }}"
+    gid: "{{ item.gid }}"
+  loop: "{{ host_groups }}"
+
+- name: Create service users
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    uid: "{{ item.uid }}"
+    group: "{{ item.group }}"
+  loop: "{{ host_service_users }}"
+
+# --- Admin user ---
+- name: Create admin user
+  ansible.builtin.user:
+    name: "{{ host_admin_user }}"
+    groups: sudo
+
+- name: Create NOPASSWD sudoers rule
+  ansible.builtin.lineinfile:
+    path: "/etc/sudoers.d/99-ansible-nopasswd-{{ host_admin_user }}"
+    line: "{{ host_admin_user }} ALL=(ALL) NOPASSWD: ALL"
+    create: true
+    owner: root
+    group: root
+    mode: "0440"
+
+# --- SSH keys ---
+- name: Create SSH directory for admin user
+  ansible.builtin.file:
+    path: "/home/{{ host_admin_user }}/.ssh"
+    state: directory
+    mode: "0755"
+
+- name: Copy authorized_keys
+  ansible.builtin.copy:
+    src: ~/.ssh/authorized_keys2
+    dest: "/home/{{ host_admin_user }}/.ssh/authorized_keys2"
+    mode: "0644"
+    owner: "{{ host_admin_user }}"
+    group: "{{ host_admin_user }}"
+  when: not (ansible_pull_mode | default(false))
+
+- name: Upload public SSH keys
+  ansible.builtin.copy:
+    src: "~/.ssh/{{ item }}.pub"
+    dest: "/home/{{ host_admin_user }}/.ssh/{{ item }}.pub"
+    mode: "0600"
+    owner: "{{ host_admin_user }}"
+    group: "{{ host_admin_user }}"
+  loop: "{{ host_ssh_keys }}"
+  when: not (ansible_pull_mode | default(false))
+
+- name: Upload private SSH keys
+  ansible.builtin.copy:
+    src: "~/.ssh/{{ item }}"
+    dest: "/home/{{ host_admin_user }}/.ssh/{{ item }}"
+    mode: "0600"
+    owner: "{{ host_admin_user }}"
+    group: "{{ host_admin_user }}"
+  loop: "{{ host_ssh_keys }}"
+  when: host_upload_private_ssh_key
+
+
+# --- AWS credentials ---
+# Hosts hold no AWS credentials whatsoever. Every AWS API call is either
+# delegated to the controller (Route53, delegate_to: localhost) or passes
+# explicit credentials (S3 backup keys, Garage). The boto file chain on a
+# managed host is a liability: it once held the leaked certbot key, copied
+# fleet-wide from the operator laptop by these very tasks.
+# See stumpcloud/stumpcloud#158.
+- name: Remove AWS credentials for admin
+  ansible.builtin.file:
+    path: "/home/{{ host_admin_user }}/.aws/credentials"
+    state: absent
+
+- name: Remove AWS credentials for root
+  ansible.builtin.file:
+    path: /root/.aws/credentials
+    state: absent

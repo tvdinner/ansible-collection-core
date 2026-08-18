@@ -1,0 +1,72 @@
+#cloud-config
+# Managed by Ansible -- generated for {{ inventory_hostname }}
+
+hostname: {{ inventory_hostname }}
+fqdn: {{ inventory_hostname }}.{{ dns.wtf }}
+manage_etc_hosts: true
+
+# Create the admin user with sudo and SSH access.
+# This is the user Ansible will SSH in as for Stages 1-6.
+users:
+  - name: {{ host_cloudinit_user }}
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {{ host_cloudinit_ssh_public_key }}
+
+# Disable password auth -- SSH key only
+ssh_pwauth: false
+
+# Install the minimum packages Ansible needs to function.
+# python3 and python3-apt are required for apt/pip modules.
+# git is needed if we do the optional ansible-pull bootstrap below.
+package_update: true
+package_upgrade: false
+packages:
+  - python3
+  - python3-pip
+  - python3-apt
+  - git
+  - ansible
+
+# Run commands on first boot after packages are installed.
+runcmd:
+  # Ensure python3 is the default (Ansible needs it at /usr/bin/python3)
+  - update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 || true
+{% if host_cloudinit_bootstrap_ansible %}
+  # --- Optional: First ansible-pull bootstrap ---
+  # This makes the VM fully hands-free: cloud-init creates the user, installs
+  # Python/Ansible, clones the repo, and runs the first convergence. By the time
+  # cloud-init finishes, the VM is at the same state as if an operator had run
+  # `playbooks/host.yaml --skip-tags proxmox` manually.
+  #
+  # Install Galaxy collections
+  - ansible-galaxy collection install -r /opt/ansible/home-cluster/requirements.yml --force || true
+  # Clone the repo (SSH key not yet available, use HTTPS with no auth for public repo,
+  # or rely on the control node's Stage 6 to set up SSH-based clone later)
+  - mkdir -p /opt/ansible
+  - git clone --branch {{ host_selfheal_branch }} https://gitea.{{ dns.wtf }}/joestump/home-cluster.git /opt/ansible/home-cluster || true
+  # Run the first convergence (skip proxmox -- we ARE the VM being created)
+  - >
+    cd /opt/ansible/home-cluster &&
+    ansible-playbook
+    -i {{ host_selfheal_inventory }}
+    {{ host_selfheal_playbook }}
+    --skip-tags proxmox
+    --connection local
+    --limit {{ inventory_hostname }}
+    -e ansible_pull_mode=true
+    >> /var/log/cloud-init-ansible.log 2>&1 || true
+{% endif %}
+
+# Write a marker file so Stage 1 can detect this was a cloud-init bootstrap
+write_files:
+  - path: /etc/ansible-cloud-init-done
+    content: |
+      bootstrap_date={{ '{{' }} ansible_date_time.iso8601 | default("unknown") {{ '}}' }}
+      hostname={{ inventory_hostname }}
+    permissions: '0644'
+
+final_message: "Cloud-init for {{ inventory_hostname }} completed in $UPTIME seconds"

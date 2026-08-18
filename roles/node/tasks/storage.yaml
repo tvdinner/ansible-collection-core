@@ -1,0 +1,123 @@
+---
+# roles/host/tasks/storage.yaml
+# ZFS pool setup, ZED email alerting, and node_exporter metrics.
+# Only runs when host_zfs_pool.name is defined.
+# Governing: ADR-0020 (disk passthrough), ADR-0015 (observability)
+
+- name: Install ZFS and SMTP tools
+  ansible.builtin.apt:
+    name:
+      - zfsutils-linux
+      - msmtp-mta       # provides /usr/sbin/sendmail symlink for ZED
+    state: present
+    update_cache: false
+  when: host_zfs_pool.name is defined
+
+- name: Template msmtp system config for ZED email
+  ansible.builtin.template:
+    src: msmtprc.j2
+    dest: /etc/msmtprc
+    owner: root
+    group: root
+    mode: "0640"
+  when: host_zfs_pool.name is defined
+
+- name: Configure ZED for email alerts
+  ansible.builtin.lineinfile:
+    path: /etc/zfs/zed.d/zed.rc
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    create: false
+  loop:
+    - regexp: '^#?ZED_EMAIL_ADDR='
+      line: 'ZED_EMAIL_ADDR="{{ host_zfs_zed_email }}"'
+    - regexp: '^#?ZED_NOTIFY_INTERVAL_SECS='
+      line: 'ZED_NOTIFY_INTERVAL_SECS=3600'
+    - regexp: '^#?ZED_NOTIFY_VERBOSE='
+      line: 'ZED_NOTIFY_VERBOSE=1'
+    - regexp: '^#?ZED_USE_ENCLOSURES='
+      line: 'ZED_USE_ENCLOSURES=0'
+  when: host_zfs_pool.name is defined and host_zfs_zed_email != ''
+
+- name: Enable and start zfs-zed service
+  ansible.builtin.systemd:
+    name: zfs-zed
+    enabled: true
+    state: started
+  when: host_zfs_pool.name is defined
+
+- name: Check if ZFS pool already exists
+  ansible.builtin.command: zpool list {{ host_zfs_pool.name }}
+  register: _zpool_check
+  failed_when: false
+  changed_when: false
+  when: host_zfs_pool.name is defined
+
+- name: Create ZFS pool
+  ansible.builtin.command: >
+    zpool create
+    -o ashift={{ host_zfs_pool.ashift | default(12) }}
+    -O compression={{ host_zfs_pool.compression | default('lz4') }}
+    -O atime={{ host_zfs_pool.atime | default('off') }}
+    -O xattr=sa
+    -O dnodesize=auto
+    -O mountpoint={{ host_zfs_pool.mountpoint | default('/' + host_zfs_pool.name) }}
+    {{ host_zfs_pool.name }}
+    {{ host_zfs_pool.type | default('raidz1') }}
+    {{ host_zfs_pool.disks | join(' ') }}
+  when:
+    - host_zfs_pool.name is defined
+    - _zpool_check.rc != 0
+  register: _zpool_create
+
+- name: Create ZFS datasets
+  ansible.builtin.command: zfs create {{ item }}
+  loop: "{{ host_zfs_datasets }}"
+  register: _zfs_dataset
+  failed_when: _zfs_dataset.rc != 0 and 'dataset already exists' not in _zfs_dataset.stderr
+  changed_when: _zfs_dataset.rc == 0
+  when: host_zfs_datasets | length > 0
+
+- name: Set ZFS dataset quotas
+  ansible.builtin.command: zfs set quota={{ item.value }} {{ item.key }}
+  loop: "{{ host_zfs_quotas | dict2items }}"
+  when: host_zfs_quotas | length > 0
+  changed_when: true  # zfs set is idempotent but doesn't indicate change
+
+- name: Enable ZFS auto-import on boot
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+  loop:
+    - zfs-import-cache.service
+    - zfs-import-scan.service
+    - zfs-mount.service
+  when: host_zfs_pool.name is defined
+
+- name: Deploy node_exporter for ZFS and host metrics
+  community.docker.docker_compose_v2:
+    project_name: node-exporter
+    definition:
+      services:
+        app:
+          image: "{{ host_node_exporter_image }}"
+          container_name: node-exporter
+          restart: unless-stopped
+          network_mode: host
+          pid: host
+          volumes:
+            - /proc:/host/proc:ro
+            - /sys:/host/sys:ro
+            - /:/rootfs:ro
+          command:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/rootfs
+            - --collector.zfs
+            - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+          labels:
+            kuma.node-exporter.http.name: "node-exporter"
+            kuma.node-exporter.http.url: "http://{{ inventory_hostname }}.{{ dns.wtf }}:9100/metrics"
+            kuma.node-exporter.http.interval: "120"
+  become: true
+  when: host_node_exporter_enabled | bool

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# ansible-converge: flock wrapper for local ansible-pull
+# Managed by Ansible -- do not edit manually
+
+set -euo pipefail
+
+LOCK="{{ host_selfheal_lock_file }}"
+LOG="{{ host_selfheal_log_file }}"
+REPO="{{ host_selfheal_repo_dir }}"
+BRANCH="{{ host_selfheal_branch }}"
+PLAYBOOK="{{ host_selfheal_playbook }}"
+INVENTORY="{{ host_selfheal_inventory }}"
+SSH_KEY="{{ host_selfheal_ssh_key }}"
+
+exec >> "$LOG" 2>&1
+
+echo "=========================================="
+echo "ansible-converge starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=========================================="
+
+# Acquire exclusive lock -- fail immediately if another run is in progress
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    echo "Another ansible-converge is already running. Exiting."
+    exit 0
+fi
+
+# Pull latest changes (best-effort -- repo works offline)
+cd "$REPO"
+GIT_SSH_COMMAND="ssh -i $SSH_KEY -o StrictHostKeyChecking=accept-new" \
+    git fetch origin "$BRANCH" 2>/dev/null || echo "WARN: git fetch failed (offline?), using cached repo"
+git reset --hard "origin/$BRANCH" 2>/dev/null || true
+
+# Run ansible-playbook locally, skipping Proxmox and credential stages
+ansible-playbook \
+    -i "$INVENTORY" \
+    "$PLAYBOOK" \
+    --skip-tags proxmox \
+    --connection local \
+    --limit "{{ inventory_hostname }}" \
+    -e "ansible_pull_mode=true" \
+    2>&1
+
+EXIT_CODE=$?
+echo "ansible-converge finished at $(date -u +%Y-%m-%dT%H:%M:%SZ) with exit code $EXIT_CODE"
+exit $EXIT_CODE

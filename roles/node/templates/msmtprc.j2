@@ -1,0 +1,17 @@
+# /etc/msmtprc — system-wide msmtp config for ZED email alerts
+# Managed by Ansible — do not edit manually
+# Governing: ADR-0015 (observability/alerting)
+
+defaults
+auth           on
+tls            on
+tls_starttls   off
+syslog         on
+
+account        default
+host           {{ smtp.host }}
+port           {{ smtp.port }}
+from           {{ smtp.from }}
+user           {{ smtp.user }}
+password       {{ smtp.pass }}
+

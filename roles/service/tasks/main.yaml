@@ -1,0 +1,394 @@
+---
+# Main tasks for the service role
+
+# Governing: ADR-0015 (observability)
+# Refuse rather than guess. A docker-type Kuma monitor names its daemon by id, so
+# a missing id is not a missing feature — it is every container monitor on this
+# host silently pointed at some other host's daemon and reporting DOWN. The old
+# `| default('1')` did exactly that and stayed invisible because a wrong-but-
+# plausible id looks like a working monitor that just happens to be red.
+- name: Guard — refuse to emit container monitors without a Kuma Docker host id
+  ansible.builtin.assert:
+    that:
+      - service_kuma_docker_host_id | string | length > 0
+    fail_msg: >-
+      {{ inventory_hostname }} is in `docker_hosts` but sets no
+      `kuma_docker_host_id`, so AutoKuma would bind every container monitor on
+      this host to whichever daemon happens to be id 1. Read the real id out of
+      Uptime Kuma (`SELECT id, name FROM docker_host;`) and set
+      `kuma_docker_host_id` in this host's inventory vars.
+  when: service_kuma_docker_enabled
+
+- name: Create main {{ service_data_dir }} directory
+  file:
+    path: "{{ paths.local }}/{{ service_data_dir }}"
+    state: directory
+    owner: "{{ service_puid }}"
+    group: "{{ service_pgid }}"
+  when: service_dirs | length > 0 or service_volumes | length > 0
+
+- name: Create {{ service_data_dir }} sub-directories
+  file:
+    path: "{{ paths.local }}/{{ service_data_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ service_puid }}"
+    group: "{{ service_pgid }}"
+    recurse: true
+  loop: "{{ service_dirs }}"
+  when: service_dirs | length > 0
+
+# PostgreSQL database setup
+#
+# Disabled services (service_enabled == false) are soft-tombstoned: converge
+# must be a no-op for them, not a teardown (the ADR-0040 reduit precedent —
+# data and secrets are preserved on disable, removal is a documented manual
+# step). The absent-mode drops this block used to implement were also broken
+# for their stated purpose: after postgresql_db drops a database, the user
+# drop connects to that now-missing database and fatals ('database "bazarr"
+# does not exist', run 6334 shard 3 — stumpcloud/stumpcloud#248). Skipping
+# entirely fixes both the failure and the data-preservation intent.
+- name: Create PostgreSQL database '{{ service_db.name }}'
+  community.postgresql.postgresql_db:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    name: "{{ service_db.name }}"
+    login_host: "{{ service_db.host | default(inventory_hostname) }}.{{ service_dns_internal }}"
+    login_user: "{{ hostvars[service_db.host | default(inventory_hostname)].postgres.user }}"
+    login_password: "{{ hostvars[service_db.host | default(inventory_hostname)].postgres.pass }}"
+  when: service_enabled and service_db.enabled and service_db.type == 'postgres'
+
+- name: Create PostgreSQL user '{{ service_db.user }}'
+  community.postgresql.postgresql_user:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    db: "{{ service_db.name }}"
+    name: "{{ service_db.user }}"
+    password: "{{ service_db.pass }}"
+    role_attr_flags: SUPERUSER
+    login_host: "{{ service_db.host | default(inventory_hostname) }}.{{ service_dns_internal }}"
+    login_user: "{{ hostvars[service_db.host | default(inventory_hostname)].postgres.user }}"
+    login_password: "{{ hostvars[service_db.host | default(inventory_hostname)].postgres.pass }}"
+  when: service_enabled and service_db.enabled and service_db.type == 'postgres'
+
+- name: Grant PostgreSQL privileges on '{{ service_db.name }}'
+  community.postgresql.postgresql_privs:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    db: "{{ service_db.name }}"
+    privs: ALL
+    type: database
+    roles: "{{ service_db.user }}"
+    login_host: "{{ service_db.host | default(inventory_hostname) }}.{{ service_dns_internal }}"
+    login_user: "{{ hostvars[service_db.host | default(inventory_hostname)].postgres.user }}"
+    login_password: "{{ hostvars[service_db.host | default(inventory_hostname)].postgres.pass }}"
+  when: service_enabled and service_db.enabled and service_db.type == 'postgres'
+
+# MariaDB/MySQL database setup — same disabled-service skip as PostgreSQL
+# above (stumpcloud/stumpcloud#248).
+- name: Create MariaDB database '{{ service_db.name }}'
+  mysql_db:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    name: "{{ service_db.name }}"
+    login_host: "{{ service_db.host | default(inventory_hostname) }}.{{ service_dns_internal }}"
+    login_user: "{{ hostvars[service_db.host | default(inventory_hostname)].mariadb.user }}"
+    login_password: "{{ hostvars[service_db.host | default(inventory_hostname)].mariadb.pass }}"
+  when: service_enabled and service_db.enabled and service_db.type in ['mariadb', 'mysql']
+
+- name: Create MariaDB user '{{ service_db.user }}'
+  mysql_user:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    name: "{{ service_db.user }}"
+    password: "{{ service_db.pass }}"
+    host: '%'
+    priv: '*.*:ALL'
+    login_host: "{{ service_db.host | default(inventory_hostname) }}.{{ service_dns_internal }}"
+    login_user: "{{ hostvars[service_db.host | default(inventory_hostname)].mariadb.user }}"
+    login_password: "{{ hostvars[service_db.host | default(inventory_hostname)].mariadb.pass }}"
+  when: service_enabled and service_db.enabled and service_db.type in ['mariadb', 'mysql']
+
+# Docker Compose file-based secrets
+# Governing: SPEC-0002 REQ "Secret File Management"
+- name: Create secrets directory for {{ service_name }}
+  file:
+    path: "{{ paths.local }}/{{ service_data_dir }}/secrets"
+    state: directory
+    owner: "{{ service_puid }}"
+    group: "{{ service_pgid }}"
+    mode: "0750"
+  when: service_secrets | length > 0
+
+- name: Write secret files for {{ service_name }}
+  copy:
+    content: "{{ item.value }}"
+    dest: "{{ paths.local }}/{{ service_data_dir }}/secrets/{{ item.key }}"
+    owner: "{{ service_puid }}"
+    group: "{{ service_pgid }}"
+    mode: "0600"
+  loop: "{{ service_secrets | dict2items }}"
+  when: service_secrets | length > 0
+  no_log: true
+
+# Homepage widget credentials must never reach a container label — they are
+# plaintext in `docker inspect` for anything holding the Docker socket. This is
+# the guardrail, not a suggestion: a literal on one of these fields fails the
+# converge rather than quietly re-publishing the credential. Use
+# `homepage_secrets:` (see roles/service/defaults/main.yaml).
+#
+# Only the offending label KEYS are reported; the values are never interpolated
+# into the message, and `assert` echoes the expression text rather than the
+# evaluated vars, so a failure cannot leak what it caught.
+- name: Assert {{ service_name }} publishes no plaintext Homepage widget credential
+  ansible.builtin.assert:
+    that: _service_homepage_plaintext_credentials | length == 0
+    fail_msg: >-
+      {{ service_name }} sets {{ _service_homepage_plaintext_credentials | join(', ') }}
+      to a literal value. Those labels are readable by every container with Docker
+      socket access. Move the value into the site's homepage_widget_secrets map and
+      reference it from `homepage_secrets:` on this service instead.
+    quiet: true
+  vars:
+    _service_homepage_credential_labels: >-
+      {{ service_homepage_secret_fields | map('regex_replace', '^', 'homepage.widget.') | list }}
+    # An empty value is not a credential — bazarr ships homepage.widget.key: ""
+    # on purpose while it is disabled, and a bare `key:` (null) is the same
+    # thing. Everything else is.
+    #
+    # Every value is compared AS A STRING. A `selectattr('value', 'string')`
+    # here would have quietly waved through exactly the values YAML does not
+    # hand back as strings: an unquoted numeric key (`key: 8675309`) and an
+    # unquoted `password: no`, which YAML 1.1 parses as the boolean False. Both
+    # reach the label as plaintext, and a guard that skips them is worse than no
+    # guard because it reports success. Docker labels are strings regardless of
+    # what the inventory wrote, so string comparison is the honest check.
+    _service_homepage_plaintext_credentials: >-
+      {%- set result = [] -%}
+      {%- for item in service_labels | dict2items -%}
+        {%- if item.key in _service_homepage_credential_labels -%}
+          {%- set value = '' if item.value is none else item.value | string -%}
+          {%- if value != '' and not value is match('^[{][{]HOMEPAGE_FILE_[A-Z0-9_]+[}][}]$') -%}
+            {%- if result.append(item.key) -%}{%- endif -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+
+# Docker Compose deployment
+- name: Docker Compose for {{ service_dns }}.{{ service_public_domain }}
+  community.docker.docker_compose_v2:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    project_name: "{{ service_dns }}"
+    remove_orphans: true
+    pull: "{{ service_pull }}"
+    recreate: "{{ service_recreate }}"
+    timeout: "{{ service_timeout }}"
+    definition: "{{ _service_compose_definition }}"
+  vars:
+    _service_base_labels: {}
+    _service_homepage_labels_base:
+      homepage.group: "{{ service_homepage.group }}"
+      homepage.name: "{{ service_homepage.name }}"
+      homepage.icon: "{{ service_homepage.icon }}"
+      homepage.description: "{{ service_homepage.description }}"
+      homepage.weight: "{{ service_homepage.weight | string }}"
+    _service_homepage_href: "{{ {} if service_homepage.href is defined and service_homepage.href == '' else {'homepage.href': service_homepage.href | default('https://' ~ service_dns ~ '.' ~ service_public_domain)} }}"
+    _service_homepage_labels: "{{ {} if not service_homepage.enabled else _service_homepage_labels_base | combine(_service_homepage_href) }}"
+    # The indirection, not the value. Homepage substitutes {{HOMEPAGE_FILE_X}} in
+    # a discovered container label exactly as it does in a config file, reading
+    # the path in $HOMEPAGE_FILE_X — so the credential only ever exists on the
+    # dashboard host. Governing: ADR-0006, stumpcloud#215.
+    _service_homepage_secret_labels: >-
+      {%- set result = {} -%}
+      {%- for field, name in service_homepage_secrets.items() -%}
+        {%- if result.update({'homepage.widget.' ~ field: '{{' ~ 'HOMEPAGE_FILE_' ~ (name | upper) ~ '}}'}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+    _service_caddy_labels: "{{ {} if (not service_caddy.enabled or service_vpn.enabled) else {
+      'caddy': service_dns ~ '.' ~ service_public_domain,
+      'caddy.reverse_proxy': '{{upstreams ' ~ service_port ~ '}}'
+    } }}"
+    _service_oauth2_proxy_labels: "{{ {} if (not service_oauth2_proxy.enabled or not service_caddy.enabled) else {
+      'caddy.forward_auth': service_oauth2_proxy.container ~ ':' ~ (service_oauth2_proxy.port | string),
+      'caddy.forward_auth.uri': '/oauth2/auth',
+      'caddy.forward_auth.copy_headers': 'X-Auth-Request-User ' ~ service_oauth2_proxy.remote_user_header,
+      'caddy.forward_auth.@unauthorized': 'status 401 403',
+      'caddy.forward_auth.handle_response': '@unauthorized',
+      'caddy.forward_auth.handle_response.redir': '* ' ~ service_oauth2_proxy.auth_url ~ '/oauth2/start?rd=https://{host}{uri}'
+    } }}"
+    _service_alias_redirect_labels: >-
+      {%- set output = {} -%}
+      {%- for alias in service_aliases -%}
+        {%- if output.update({'caddy_' ~ loop.index: alias, 'caddy_' ~ loop.index ~ '.redir': 'https://' ~ service_dns ~ '.' ~ service_public_domain ~ '{uri} permanent'}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ output }}
+    _service_autokuma_http_labels: "{{ {} if (not service_caddy.enabled or service_vpn.enabled) else {
+      'kuma.' ~ service_dns ~ '.http.url': 'https://' ~ service_dns ~ '.' ~ service_public_domain,
+      'kuma.' ~ service_dns ~ '.http.name': service_dns,
+      'kuma.' ~ service_dns ~ '.http.accepted_statuscodes': '[\"200-299\",\"301\",\"302\",\"401\",\"403\"]',
+      'kuma.' ~ service_dns ~ '.http.interval': '60',
+      'kuma.' ~ service_dns ~ '.http.max_retries': '3'
+    } }}"
+    _service_autokuma_docker_labels: "{{ {} if not service_kuma_docker_enabled else {
+      'kuma.' ~ service_dns ~ '-container.docker.docker_host': service_kuma_docker_host_id,
+      'kuma.' ~ service_dns ~ '-container.docker.docker_container': service_dns,
+      'kuma.' ~ service_dns ~ '-container.docker.name': service_dns ~ ' container',
+      'kuma.' ~ service_dns ~ '-container.docker.interval': '60'
+    } }}"
+    # A sidecar inherits the app's restart policy unless it sets its own.
+    # Compose treats an unset `restart` as "no", so a sidecar that omitted it
+    # stayed DOWN after a host reboot while the app — restart: unless-stopped —
+    # came back and crash-looped against the dependency that never returned.
+    # firecrawl's rabbitmq did exactly that on 2026-08-08: the sidecar exited
+    # 255 with the daemon, only the app was restarted, and every worker died on
+    # `getaddrinfo ENOTFOUND firecrawl-rabbitmq`. Defaulting here rather than
+    # per sidecar means a newly added sidecar cannot forget it.
+    _service_sidecars_with_kuma_labels: >-
+      {%- set ns = namespace(result={}) -%}
+      {%- for name, sidecar in service_sidecars.items() -%}
+        {%- set kuma_labels = {} if not service_kuma_docker_enabled else {
+          'kuma.' ~ name ~ '-container.docker.docker_host': service_kuma_docker_host_id,
+          'kuma.' ~ name ~ '-container.docker.docker_container': name,
+          'kuma.' ~ name ~ '-container.docker.name': name ~ ' container',
+          'kuma.' ~ name ~ '-container.docker.interval': '60'
+        } -%}
+        {%- set _ = ns.result.update({name: {'restart': service_restart} | combine(sidecar) | combine({'labels': (sidecar.labels | default({})) | combine(kuma_labels)})}) -%}
+      {%- endfor -%}
+      {{ ns.result }}
+    _service_all_labels: "{{ _service_base_labels | combine(_service_homepage_labels) | combine(_service_caddy_labels) | combine(_service_oauth2_proxy_labels) | combine(_service_alias_redirect_labels) | combine(_service_autokuma_http_labels) | combine(_service_autokuma_docker_labels) | combine(service_labels) | combine(_service_homepage_secret_labels) }}"
+    _service_security_opt: "{{ ['no-new-privileges:true'] if service_security.no_new_privileges else [] }}"
+    _service_network_mode: "{{ 'container:' ~ service_vpn.container if service_vpn.enabled else omit }}"
+    _service_networks: "{{ omit if service_vpn.enabled else service_networks }}"
+    # Governing: SPEC-0002 REQ "Docker Compose Secrets Generation"
+    _service_secrets_compose: >-
+      {%- set result = {} -%}
+      {%- for key in service_secrets -%}
+        {%- if result.update({service_name ~ '_' ~ key: {'file': paths.local ~ '/' ~ service_data_dir ~ '/secrets/' ~ key}}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+    _service_secrets_list: >-
+      {%- set result = [] -%}
+      {%- for key in service_secrets -%}
+        {%- if result.append(service_name ~ '_' ~ key) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+    _service_file_env: >-
+      {%- set result = {} -%}
+      {%- for env_key, secret_key in service_secrets_file_env.items() -%}
+        {%- if result.update({env_key: '/run/secrets/' ~ service_name ~ '_' ~ secret_key}) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ result }}
+    # deploy.resources — merges optional GPU device reservations (Compose GPU
+    # spec) with any user-supplied resources so a service gets the NVIDIA GPU
+    # through the role instead of raw compose. See service_gpu in defaults.
+    _service_deploy: >-
+      {%- set res = service_resources | combine({}) -%}
+      {%- if service_gpu.enabled -%}
+        {%- set dev = {'driver': 'nvidia', 'capabilities': service_gpu.capabilities} -%}
+        {%- if service_gpu.device_ids | length > 0 -%}
+          {%- set _ = dev.update({'device_ids': service_gpu.device_ids | map('string') | list}) -%}
+        {%- else -%}
+          {%- set _ = dev.update({'count': service_gpu.count}) -%}
+        {%- endif -%}
+        {%- set reservations = res.reservations | default({}) -%}
+        {%- set devices = reservations.devices | default([]) + [dev] -%}
+        {%- set res = res | combine({'reservations': reservations | combine({'devices': devices})}) -%}
+      {%- endif -%}
+      {{ {'resources': res} if res else {} }}
+    # cloud-init writes "127.0.1.1 <fqdn>" to /etc/hosts; Docker's DNS inherits this
+    # via systemd-resolved, breaking container→host resolution. extra_hosts with
+    # host-gateway maps the FQDN to the real host IP inside every container.
+    _service_extra_hosts:
+      - "{{ inventory_hostname }}.{{ service_dns_internal }}:host-gateway"
+    _service_app_definition:
+      app:
+        image: "{{ service_image }}"
+        container_name: "{{ service_dns }}"
+        restart: "{{ service_restart }}"
+        networks: "{{ _service_networks }}"
+        network_mode: "{{ _service_network_mode }}"
+        extra_hosts: "{{ omit if service_vpn.enabled else _service_extra_hosts }}"
+        labels: "{{ _service_all_labels }}"
+        volumes: "{{ service_volumes if service_volumes | length > 0 else omit }}"
+        environment: "{{ {'TZ': tz, 'PUID': service_puid | string, 'PGID': service_pgid | string} | combine(service_environment) | combine(_service_file_env) }}"
+        ports: "{{ service_ports if service_ports | length > 0 else omit }}"
+        privileged: "{{ service_privileged if service_privileged else omit }}"
+        pid: "{{ service_pid if service_pid else omit }}"
+        user: "{{ service_user if service_user else omit }}"
+        devices: "{{ service_devices if service_devices | length > 0 else omit }}"
+        security_opt: "{{ _service_security_opt if _service_security_opt | length > 0 else omit }}"
+        cap_drop: "{{ service_security.cap_drop if service_security.cap_drop | length > 0 else omit }}"
+        cap_add: "{{ service_security.cap_add if service_security.cap_add | length > 0 else omit }}"
+        command: "{{ service_command if service_command | length > 0 else omit }}"
+        healthcheck: "{{ service_healthcheck if service_healthcheck else omit }}"
+        deploy: "{{ _service_deploy if _service_deploy else omit }}"
+        shm_size: "{{ service_shm_size if service_shm_size else omit }}"
+        ulimits: "{{ service_ulimits if service_ulimits else omit }}"
+        depends_on: "{{ service_depends_on if service_depends_on | length > 0 else omit }}"
+        secrets: "{{ _service_secrets_list if _service_secrets_list | length > 0 else omit }}"
+    _service_compose_definition:
+      networks: "{{ {} if service_vpn.enabled else {'caddy': {'external': true}} }}"
+      secrets: "{{ _service_secrets_compose if _service_secrets_compose | length > 0 else omit }}"
+      services: "{{ _service_app_definition | combine(_service_sidecars_with_kuma_labels) }}"
+
+# DNS CNAME creation (public Route53 records — Governing: ADR-0042)
+- name: CNAME {{ service_dns }}.{{ service_public_domain }} to {{ inventory_hostname }}.{{ service_dns_external }}
+  amazon.aws.route53:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    overwrite: true
+    zone: "{{ service_public_domain }}"
+    record: "{{ service_dns }}.{{ service_public_domain }}"
+    type: CNAME
+    value: "{{ inventory_hostname }}.{{ service_dns_external }}"
+    ttl: 60
+  delegate_to: localhost
+  # ansible_become (a connection var, set true for the fleet in inventory) outranks
+  # the `become:` keyword, and implicit localhost inherits it — so a delegated
+  # task needs the var overridden, not the keyword, or it demands sudo on the
+  # CONTROL NODE. Invisible in CI, whose runner is already root.
+  become: false
+  vars:
+    ansible_become: false
+  when: service_dns_cname.enabled
+
+# A domain override (service_public_domain != service_dns_external) moves the
+# service's record into the override zone, but the record it previously held in
+# the external zone is no longer converged by the task above — left alone it
+# dangles forever, resolving to the host but failing TLS (beszel.stump.wtf
+# after its move to stump.rocks). Prune it so a domain move converges the old
+# zone to absent. Skipped when the old name is kept on purpose as an alias.
+- name: Remove stale CNAME {{ service_dns }}.{{ service_dns_external }} left by the domain override
+  amazon.aws.route53:
+    state: absent
+    zone: "{{ service_dns_external }}"
+    record: "{{ service_dns }}.{{ service_dns_external }}"
+    type: CNAME
+    value: "{{ inventory_hostname }}.{{ service_dns_external }}"
+    ttl: 60
+  delegate_to: localhost
+  # ansible_become (a connection var, set true for the fleet in inventory) outranks
+  # the `become:` keyword, and implicit localhost inherits it — so a delegated
+  # task needs the var overridden, not the keyword, or it demands sudo on the
+  # CONTROL NODE. Invisible in CI, whose runner is already root.
+  become: false
+  vars:
+    ansible_become: false
+  when:
+    - service_dns_cname.enabled
+    - service_public_domain != service_dns_external
+    - (service_dns ~ '.' ~ service_dns_external) not in service_aliases
+
+- name: CNAME alias {{ item }} to {{ inventory_hostname }}.{{ service_dns_external }}
+  amazon.aws.route53:
+    state: "{{ service_enabled | ternary('present', 'absent') }}"
+    overwrite: true
+    zone: "{{ item.split('.')[-2:] | join('.') }}"
+    record: "{{ item }}"
+    type: CNAME
+    value: "{{ inventory_hostname }}.{{ service_dns_external }}"
+    ttl: 60
+  delegate_to: localhost
+  # ansible_become (a connection var, set true for the fleet in inventory) outranks
+  # the `become:` keyword, and implicit localhost inherits it — so a delegated
+  # task needs the var overridden, not the keyword, or it demands sudo on the
+  # CONTROL NODE. Invisible in CI, whose runner is already root.
+  become: false
+  vars:
+    ansible_become: false
+  loop: "{{ service_aliases }}"
+  when: service_aliases | length > 0

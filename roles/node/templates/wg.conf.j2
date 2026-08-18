@@ -1,0 +1,22 @@
+## Managed by Ansible (host_wireguard) -- do not edit.
+## Governing: ADR-0041 (host-level WireGuard mesh attachment).
+[Interface]
+Address = {{ host_wireguard.address | join(', ') }}
+PrivateKey = {{ host_wireguard.private_key }}
+{% if host_wireguard.mtu | default(none) is not none %}
+MTU = {{ host_wireguard.mtu }}
+{% endif %}
+{% if host_wireguard.dns | default(none) is not none %}
+## Route only the internal domain to the mesh resolver; keep public DNS for
+## everything else (systemd-resolved routing domain).
+PostUp = resolvectl dns %i {{ host_wireguard.dns.server }}; resolvectl domain %i ~{{ host_wireguard.dns.routing_domain }}
+PostDown = resolvectl revert %i
+{% endif %}
+
+[Peer]
+PublicKey = {{ host_wireguard.peer.public_key }}
+Endpoint = {{ host_wireguard.peer.endpoint }}
+AllowedIPs = {{ host_wireguard.peer.allowed_ips | join(', ') }}
+{% if host_wireguard.peer.persistent_keepalive | default(none) is not none %}
+PersistentKeepalive = {{ host_wireguard.peer.persistent_keepalive }}
+{% endif %}

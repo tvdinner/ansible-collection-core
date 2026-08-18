@@ -1,0 +1,33 @@
+---
+# roles/base/tasks/main.yaml
+#
+# Governing: ADR-0049 (layered base configuration), ADR-0051 (Proxmox hosts take
+# the common layer), SPEC-0029 REQ "Base Playbook Is Split Into Common and
+# Server Layers", REQ "Server Layer Is Excluded From Desktop and Proxmox Hosts".
+# Part of stumpcloud/stumpcloud#155
+#
+# Two layers, one guard, one definition. Both entry points come through here:
+#
+#   playbooks/base.yaml  — operator runs and CI's converge-base
+#   roles/host           — first bootstrap and the nightly ansible-pull self-heal
+#
+# That last one is why this role exists. The guard used to live only in
+# playbooks/base.yaml while roles/host carried a second, unguarded copy of the
+# same tasks — so a host bootstrapped or self-healed through roles/host got the
+# pre-ADR-0049 behaviour, and the protection was only as good as which entry
+# point you happened to use.
+
+- name: Common layer — every managed host
+  ansible.builtin.import_tasks: common.yaml
+
+# import_tasks, not include_tasks: a static import applies this condition to
+# each imported task at parse time and keeps the task list statically
+# analysable, which is what lets the test suite assert the guard still exists
+# (SPEC-0029 REQ "Layering Is Covered By Tests").
+#
+# Set intersection rather than a chain of `'x' not in group_names` clauses, so
+# adding a protected host class is a one-line data change in defaults/ rather
+# than an edit to a condition someone has to read carefully.
+- name: Server layer — headless guest fleet only
+  ansible.builtin.import_tasks: server.yaml
+  when: base_server_excluded_groups | intersect(group_names) | length == 0

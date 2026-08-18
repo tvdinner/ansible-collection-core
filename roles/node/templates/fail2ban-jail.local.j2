@@ -1,0 +1,18 @@
+# Managed by Ansible (roles/host edge-hardening.yaml) -- do not edit.
+# Governing: ADR-0044 (public edge posture). SSH brute-force protection for
+# internet-exposed hosts (cloud01). Bans via nftables (its own f2b table,
+# independent of Docker's rules). Trusted mesh/LAN CIDRs are never banned.
+[DEFAULT]
+ignoreip = {{ host_edge_trusted_cidrs | join(' ') }}
+bantime  = {{ host_fail2ban_bantime }}
+findtime = {{ host_fail2ban_findtime }}
+maxretry = {{ host_fail2ban_maxretry }}
+# Ubuntu 24.04 ships sshd logs to the journal.
+backend  = systemd
+banaction = nftables-multiport
+banaction_allports = nftables-allports
+
+[sshd]
+enabled = true
+mode = aggressive
+port = ssh

@@ -1,0 +1,92 @@
+---
+# roles/host/tasks/baseline-services.yaml
+# Deploys baseline infrastructure containers on every node.
+
+# --- Homepage dashboard ---
+# Homepage is only deployed on hosts in the 'homepage' group.
+# The homepage playbook remains separate since it's a full service role deployment.
+
+# --- Dozzle Agent ---
+- name: Deploy Dozzle Agent
+  community.docker.docker_compose_v2:
+    project_name: dozzle-agent
+    definition:
+      services:
+        dozzle-agent:
+          image: amir20/dozzle:latest
+          command: agent
+          container_name: dozzle-agent
+          restart: unless-stopped
+          network_mode: host
+          volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+
+# --- Beszel Agent ---
+# Deployed by playbooks/services/monitoring.yaml, NOT here. There used to be a
+# second, near-identical definition at this spot; two definitions of one
+# container is exactly how the dozzle-agent fight happened (see the header of
+# monitoring.yaml), so the agent is single-sourced there. Every host this task
+# file could have deployed to (Docker hosts in a beszel_hub-carrying inventory)
+# is in `monitoring`, which is what monitoring.yaml targets.
+
+# --- What's Up Docker (WUD) ---
+- name: Deploy WUD
+  community.docker.docker_compose_v2:
+    project_name: wud
+    definition:
+      networks:
+        caddy:
+          external: true
+      services:
+        wud:
+          image: "{{ host_wud_image }}"
+          container_name: wud
+          networks:
+            - caddy
+          labels:
+            homepage.group: "{{ inventory_hostname }}"
+            homepage.name: "What's Up Docker on {{ inventory_hostname }}"
+            homepage.icon: sh-wud
+            homepage.href: "https://wud-{{ inventory_hostname }}.{{ dns.wtf }}"
+            homepage.description: Docker container maintenance and updates
+            homepage.weight: "20"
+            homepage.widget.type: whatsupdocker
+            homepage.widget.url: "https://wud-{{ inventory_hostname }}.{{ dns.wtf }}"
+            caddy: "wud-{{ inventory_hostname }}.{{ dns.wtf }}"
+            caddy.reverse_proxy: "{{ '{{' }}upstreams {{ host_wud_port }}{{ '}}' }}"
+          environment:
+            WUD_LOG_FORMAT: json
+          volumes:
+            - /etc/localtime:/etc/localtime:ro
+            - /var/run/docker.sock:/var/run/docker.sock
+          restart: unless-stopped
+  when: host_wud_enabled
+
+- name: Create WUD DNS CNAME
+  amazon.aws.route53:
+    state: present
+    overwrite: true
+    zone: "{{ dns.wtf }}"
+    record: "wud-{{ inventory_hostname }}.{{ dns.wtf }}"
+    type: CNAME
+    value: "{{ inventory_hostname }}.{{ dns.wtf }}"
+    ttl: 60
+  delegate_to: localhost
+  when: host_wud_enabled
+
+# --- Autoheal ---
+- name: Deploy Autoheal
+  community.docker.docker_compose_v2:
+    project_name: autoheal
+    definition:
+      services:
+        autoheal:
+          image: willfarrell/autoheal:latest
+          container_name: autoheal
+          environment:
+            AUTOHEAL_CONTAINER_LABEL: all
+          network_mode: none
+          restart: always
+          volumes:
+            - /etc/localtime:/etc/localtime:ro
+            - /var/run/docker.sock:/var/run/docker.sock

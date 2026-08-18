@@ -1,0 +1,325 @@
+---
+# roles/base/tasks/common.yaml
+#
+# Governing: ADR-0049 (layered base configuration), ADR-0051 (Proxmox hosts take
+# the common layer), SPEC-0029 REQ "Base Playbook Is Split Into Common and Server
+# Layers", REQ "Desktops and Hypervisors Receive Managed DNS; Hostname Excludes
+# Proxmox", REQ "The Base Layer Is Non-Disruptive To Running Workloads".
+# Part of stumpcloud/stumpcloud#149, #155
+#
+# The COMMON layer: what every managed host gets, with no exceptions — headless
+# guests, interactive desktops (kitt, tars, bender) and Proxmox nodes (lir,
+# dagda, ogma, lotor, coran) alike.
+#
+# The bar for putting a task here: it must be a *host* concern rather than a
+# *server* concern, and it must be safe on a machine somebody is using and on a
+# machine running every guest in the fleet. Nothing here reboots, restarts a
+# service, or writes to a system Python interpreter. If a task cannot meet that
+# bar it belongs in base/server.yaml.
+
+# NOT applied to Proxmox nodes, and this is the one exception in the layer.
+#
+# `ansible_host` is the FQDN (ogma.stump.rocks), but a PVE node's hostname is the
+# SHORT name (ogma) and its cluster identity is keyed on it: /etc/pve/nodes/ogma,
+# the node's own view of which directory is "mine", and every guest config
+# underneath. Renaming the host makes the node believe it is a different node —
+# /etc/pve goes read-only, its guests vanish from the UI, and recovery is manual
+# surgery on a machine running the fleet.
+#
+# Check mode caught this on ogma, lir and dagda (all three reported `changed`)
+# before it ran anywhere. SPEC-0029 requires this layer to be non-disruptive to
+# running workloads; renaming a hypervisor is the most disruptive thing in it.
+#
+# Desktops are unaffected — bender's hostname is already bender.stump.rocks, so
+# it reports `ok`, and managed hostname for desktops was one of the goals.
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ ansible_host }}"
+    use: debian
+  when: base_hostname_excluded_groups | intersect(group_names) | length == 0
+
+# Delegated to the control node. This is a Route53 API call, not a host
+# operation, and running it on the target requires boto3/botocore to be present
+# THERE — which only the `server` layer installs. Left undelegated, the task
+# fails on exactly the hosts this layer exists to serve:
+#
+#   failed: [bender] => "Failed to import the required Python library
+#   (botocore and boto3) on bender.stump.rocks's Python /usr/bin/python3.12"
+#
+# Delegating also drops a fleet-wide reason to keep boto3 on every managed host.
+# Facts are still the target's, so `ansible_default_ipv4.address` and `wg0`
+# resolve to the host whose record is being written.
+#
+# when: guards against ignore_unreachable (playbooks/base.yaml). An unreachable
+# host never gets "Gathering Facts", so ansible_default_ipv4 is undefined for
+# it — and unlike a plain missing-fact `default()`, Jinja raises on that
+# undefined attribute access rather than falling through, which is a hard task
+# FAILURE, not an ignored UNREACHABLE. That failure alone reintroduced the
+# cascade ignore_unreachable exists to prevent (confirmed live: run 5862,
+# hud01). wg0 is a plain inventory var, not a fact, so it's checked
+# independently rather than assumed to fail alongside ansible_default_ipv4.
+- name: Create A record physical host
+  amazon.aws.route53:
+    state: present
+    overwrite: true
+    zone: "{{ item }}"
+    record: "{{ inventory_hostname }}.{{ item }}"
+    type: A
+    value: "{{ wg0 | default(ansible_default_ipv4.address) }}"
+    ttl: 60
+  loop:
+    - "{{ dns.wtf }}"
+  delegate_to: localhost
+  become: false
+  when: wg0 is defined or ansible_default_ipv4 is defined
+  # `localhost` is not declared in the inventories, so it inherits all.vars —
+  # including `ansible_host: "{{ inventory_hostname }}.{{ dns.wtf }}"` and the
+  # fleet's become settings. Without these three lines the delegated task tries
+  # to SSH somewhere nonsensical and then fails on `sudo: a password is
+  # required`. Same shape as playbooks/services/beszel.yaml's Vault tasks.
+  vars:
+    ansible_connection: local
+    ansible_become: false
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+
+# Absorbed from the deleted roles/host/tasks/stage-1-base.yaml. No-op unless
+# host_mtu is set, which is why it is safe in the common layer: only cloud01
+# sets it today (gva.yaml). Governing: ADR-0002.
+- name: Configure interface MTU (netplan drop-in)
+  when: host_mtu | default(none) is not none
+  block:
+    - name: Write netplan MTU drop-in
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-mtu.yaml
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          # Managed by Ansible (host_mtu) -- do not edit
+          network:
+            version: 2
+            ethernets:
+              {{ ansible_default_ipv4.interface }}:
+                mtu: {{ host_mtu }}
+      register: _host_mtu_file
+
+    - name: Apply netplan MTU change
+      ansible.builtin.command: netplan apply
+      when: _host_mtu_file.changed
+      changed_when: true
+
+- name: Update and upgrade APT packages
+  ansible.builtin.apt:
+    upgrade: true
+    update_cache: true
+    cache_valid_time: 86400  # One day
+
+# ---------------------------------------------------------------------------
+# Unattended security updates
+#
+# Governing: ADR-0051 (a hypervisor's package state belongs to Proxmox),
+# ADR-0049 (layered base configuration).
+#
+# The task above already upgrades on every converge, but a converge is an EVENT,
+# not a schedule. The hypervisors carry no ansible-pull self-heal — checked on
+# coran 2026-08-09: no ansible timer, no root crontab — so between operator runs
+# they received no patches at all, and `unattended-upgrades` was not installed
+# anywhere in the fleet. A machine that is only patched when somebody remembers
+# to run a playbook is not patched.
+#
+# This belongs in the COMMON layer because the exposure is universal: a
+# hypervisor's Debian userland faces the network exactly like a guest's does.
+# The tasks themselves meet the common-layer bar — they install a package and
+# write two config files. Nothing here restarts a workload.
+- name: Install unattended-upgrades
+  ansible.builtin.apt:
+    state: present
+    name: unattended-upgrades
+  when: base_unattended_enabled
+
+# Origins are the whole safety story, which is why there is no Proxmox entry and
+# no package blacklist doing the work instead. Restricting to Debian-Security
+# means pve-manager, qemu-server and proxmox-kernel-* — all served from the
+# Proxmox repo — never match a candidate in the first place, so ADR-0051 holds
+# structurally rather than by a denylist somebody has to maintain. A blacklist
+# is still exposed for the case where a *Debian* package needs holding back.
+- name: Configure unattended security upgrades
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52stumpcloud-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      // Managed by Ansible (roles/base) -- do not edit.
+      Unattended-Upgrade::Origins-Pattern {
+      {% for origin in base_unattended_origins %}
+          "{{ origin }}";
+      {% endfor %}
+      };
+      Unattended-Upgrade::Package-Blacklist {
+      {% for package in base_unattended_blacklist %}
+          "{{ package }}";
+      {% endfor %}
+      };
+      Unattended-Upgrade::Automatic-Reboot "{{ 'true' if base_unattended_reboot else 'false' }}";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ base_unattended_reboot_time }}";
+      // Never reboot out from under an interactive session — the desktops
+      // (kitt, tars, bender) take this layer too.
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+  when: base_unattended_enabled
+
+- name: Enable the periodic apt run
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      // Managed by Ansible (roles/base) -- do not edit.
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+  when: base_unattended_enabled
+
+# The declared kill switch, and the reason base_unattended_enabled exists.
+#
+# During the PVE 8->9 upgrade the APT sources are rewritten to trixie partway
+# through the window. An unattended run firing in that gap would start pulling
+# trixie packages OUTSIDE the operator's transaction. On 2026-08-09 that was
+# handled by masking the timers by hand on coran — which is a state no converge
+# knows about and the next one silently reverts. Declaring it makes the
+# suppression survive a converge and, more importantly, makes it revertible.
+- name: Set the periodic apt timers to match the declared state
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: "{{ base_unattended_enabled }}"
+    masked: "{{ not base_unattended_enabled }}"
+    state: "{{ 'started' if base_unattended_enabled else 'stopped' }}"
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+
+# Universal tools only. Anything that exists to serve a *workload* — NFS, davfs,
+# database clients, archive extractors — is a server concern and lives in
+# base/server.yaml, because a hypervisor and a desktop have no use for it.
+- name: Install common APT packages
+  ansible.builtin.apt:
+    state: present
+    name: "{{ base_common_packages }}"
+
+# ---------------------------------------------------------------------------
+# rack-hud collector identity
+#
+# Governing: ADR-0050 (fleet collector identity in OpenBao), SPEC-0030 REQ "The
+# Public Key Is Installed By The Common Base Layer", REQ "The Authorized Keys
+# Path Is Explicit And Is A Regular File", REQ "A Vault Read Failure Does Not
+# Fail The Base Layer".
+# Part of stumpcloud/stumpcloud#152
+#
+# Authorizing the HUD lives HERE, in the layer every managed host runs, so a
+# host is authorized by virtue of being managed. The alternative — a separate
+# list of monitored hosts — is what produced the problem this fixes: bender was
+# onboarded on 2026-07-26, nobody remembered the manual key copy, and the panel
+# has reported it `unknown` ever since. That gap is silent by construction,
+# because "never authorized", "unreachable" and "down" all render identically.
+#
+# The producer that fills this Vault path is playbooks/services/rack-hud.yaml.
+# NOT under ansible-pull. Lookups run on the controller, and under self-heal the
+# host IS the controller — where `hvac` does not exist. Verified: no fleet host
+# has it; only the control node's Pipfile does. community.hashi_vault raises
+# AnsibleError at CLIENT CONSTRUCTION, *before* the per-term `errors='ignore'`
+# applies, so the task hard-fails, the converge dies here, and every later step
+# (users, docker, caddy, baseline, self-healing) never runs — with `no_log`
+# redacting the reason. Same guard the rest of roles/host already uses for
+# control-node-dependent work (users.yaml, wireguard.yaml).
+#
+# A self-healing host has no Vault token anyway, so there is nothing to lose:
+# operator and CI converges install the key, and a pull-mode host picks it up
+# on the next one.
+- name: Read the rack-hud collector public key from Vault
+  no_log: true
+  when: not (ansible_pull_mode | default(false))
+  ansible.builtin.set_fact:
+    _rack_hud_pubkey: >-
+      {{ lookup('community.hashi_vault.hashi_vault',
+                'secret/data/' ~ rack_hud_vault_path ~ ':ssh_public_key',
+                url=vault_conn.url,
+                auth_method=vault_conn.auth_method,
+                token=vault_conn.token,
+                errors='ignore') | default('', true) }}
+
+# Failing OPEN here is deliberate, and it is the one place in this layer where
+# that is the right call: OpenBao being unreachable must not stop a host getting
+# its hostname, DNS record and packages. A missing key is recovered on the next
+# converge; a base layer that refuses to run fleet-wide over a Vault blip is a
+# much worse failure.
+#
+# Note this is the OPPOSITE choice from the producer, which fails CLOSED on an
+# unreadable secret. The asymmetry is intentional: the producer WRITES, so
+# guessing there destroys the fleet's only collector key; this only READS a
+# public key, so guessing costs one deferred authorization.
+- name: Install the rack-hud collector key
+  when: _rack_hud_pubkey | length > 0
+  block:
+    - name: Resolve the collector user's home directory
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ rack_hud_collector_user }}"
+
+    - name: Ensure the collector user's .ssh directory exists
+      ansible.builtin.file:
+        path: "{{ _rack_hud_ssh_dir }}"
+        state: directory
+        owner: "{{ rack_hud_collector_user }}"
+        mode: "0700"
+
+    # follow: false — the question is whether the PATH is a link, not what it
+    # points at.
+    - name: Inspect the authorized_keys path
+      ansible.builtin.stat:
+        path: "{{ _rack_hud_authorized_keys }}"
+        follow: false
+      register: _rack_hud_ak
+
+    # bender's ~/.ssh/authorized_keys is a symlink to `.ssh/authorized_keys2`,
+    # which resolves to ~/.ssh/.ssh/authorized_keys2 and does not exist. sshd is
+    # configured `authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2`,
+    # so the second file is the one doing the work and the first is decorative.
+    # authorized_key would write straight THROUGH the dangling link, create a
+    # file at a path nothing reads, and report `changed` — succeeding while
+    # achieving nothing, which is the failure mode hardest to notice.
+    #
+    # A symlink pointing at a real file is handled too: its contents are copied
+    # into the regular file that replaces it, so no key that was previously
+    # effective stops being effective.
+    - name: Replace a symlinked authorized_keys with a regular file
+      when: _rack_hud_ak.stat.exists and _rack_hud_ak.stat.islnk
+      block:
+        - name: Read the keys the symlink resolves to
+          ansible.builtin.slurp:
+            src: "{{ _rack_hud_authorized_keys }}"
+          register: _rack_hud_resolved
+          failed_when: false
+
+        - name: Remove the symlink
+          ansible.builtin.file:
+            path: "{{ _rack_hud_authorized_keys }}"
+            state: absent
+
+        - name: Restore the previously effective keys as a regular file
+          ansible.builtin.copy:
+            content: "{{ (_rack_hud_resolved.content | b64decode) if (_rack_hud_resolved.content is defined) else '' }}"
+            dest: "{{ _rack_hud_authorized_keys }}"
+            owner: "{{ rack_hud_collector_user }}"
+            mode: "0600"
+
+    # The path is stated explicitly rather than left to the module default. The
+    # comment is deliberately NOT passed: the stored key already carries
+    # `rack-hud@ogma`, and passing it again rewrites the entry, so the task would
+    # report changed on every converge instead of settling.
+    - name: Authorize the rack-hud collector
+      ansible.posix.authorized_key:
+        user: "{{ rack_hud_collector_user }}"
+        path: "{{ _rack_hud_authorized_keys }}"
+        manage_dir: false
+        key: "{{ _rack_hud_pubkey }}"
+        state: present

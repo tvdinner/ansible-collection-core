@@ -1,0 +1,30 @@
+---
+# roles/base/vars/main.yaml
+#
+# Governing: ADR-0049, ADR-0051, SPEC-0029 REQ "Server Layer Is Excluded From
+# Desktop and Proxmox Hosts".
+#
+# These live in vars/, NOT defaults/, and that is the whole point. Role defaults
+# are the LOWEST-precedence variable layer: any group_vars or host_vars entry
+# silently overrides them. That is fine for a package list and wrong for a
+# safety guard — an inventory edit could quietly re-enable the server layer on a
+# desktop and nothing would say so. Role vars outrank inventory, so disabling
+# this now takes a deliberate `-e` on the command line rather than a line in a
+# YAML file nobody re-reads.
+
+# Host classes that do NOT receive the `server` layer.
+#
+# `proxmox` rather than `pve`: group_names includes parent groups, and the PBS
+# and PDM appliances (buoy, unicron) are in `proxmox` but not `pve`. They are
+# Debian machines whose own tooling uses the system interpreter, so a pve-only
+# guard would keep pinning libraries underneath a backup server.
+base_server_excluded_groups:
+  - desktop
+  - proxmox
+
+# Host classes that do NOT get a managed hostname. ansible_host is the FQDN, but
+# a Proxmox node's hostname is the SHORT name and its cluster identity is keyed
+# on it (/etc/pve/nodes/<name>). Renaming makes the node believe it is a
+# different node: /etc/pve goes read-only and its guests vanish.
+base_hostname_excluded_groups:
+  - proxmox

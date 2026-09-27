@@ -22,6 +22,19 @@ base_server_excluded_groups:
   - desktop
   - proxmox
 
+# Host classes that keep SITE-LOCAL time instead of the fleet's UTC.
+#
+# Governing: ADR-0056, ADR-0046 (managed Linux desktops).
+#
+# A desktop is used by a person: its clock, calendar and file manager are read
+# by someone sitting at it, and UTC on that screen is a cost paid every day for
+# a benefit that only accrues to log correlation.
+#
+# Here rather than in defaults/ so an inventory line cannot silently flip a
+# desktop onto UTC or a server off it.
+base_timezone_local_groups:
+  - desktop
+
 # Host classes that do NOT get a managed hostname. ansible_host is the FQDN, but
 # a Proxmox node's hostname is the SHORT name and its cluster identity is keyed
 # on it (/etc/pve/nodes/<name>). Renaming makes the node believe it is a

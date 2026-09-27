@@ -53,6 +53,7 @@
       != aws.letsencrypt.access_key_id
 
 - name: Deploy Caddy container
+  no_log: true
   community.docker.docker_compose_v2:
     state: present
     project_name: caddy
@@ -69,6 +70,11 @@
             homepage.description: "Proxy on {{ inventory_hostname }}"
             homepage.weight: "70"
             caddy.acme_dns: route53
+            # Propagation settings so LE's secondary validators see the TXT before
+            # validation — without these, new hostnames race the Route53 NS fan-out
+            # and fail with 'During secondary validation: NXDOMAIN'.
+            caddy.acme_dns.propagation_delay: 2m
+            caddy.acme_dns.propagation_timeout: 5m
             caddy.servers.protocols: h1 h2
           ports:
             - "80:80"

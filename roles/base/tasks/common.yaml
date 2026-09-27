@@ -32,11 +32,30 @@
 #
 # Desktops are unaffected — bender's hostname is already bender.stump.rocks, so
 # it reports `ok`, and managed hostname for desktops was one of the goals.
+#
+# Reads base_hostname rather than ansible_host directly. It still DEFAULTS to
+# ansible_host, so nothing moves for a host whose ansible_host is its FQDN;
+# the split exists for hosts addressed by a bare DHCP-lease IP, where the old
+# form would have set the hostname to an IP address.
 - name: Set hostname
   ansible.builtin.hostname:
-    name: "{{ ansible_host }}"
+    name: "{{ base_hostname }}"
     use: debian
   when: base_hostname_excluded_groups | intersect(group_names) | length == 0
+
+# Governing: ADR-0056 (UTC is the fleet timezone), ADR-0046 (managed desktops).
+#
+# Timezone was set by nothing before this, so every host kept whatever its
+# installer guessed. The cost is paid mid-incident when two services on two
+# machines disagree by hours and the offset must be derived by hand.
+#
+# The module is idempotent and `timedatectl set-timezone` restarts no workload.
+- name: Set the system timezone
+  community.general.timezone:
+    name: >-
+      {{ tz | default(base_timezone)
+         if base_timezone_local_groups | intersect(group_names) | length > 0
+         else base_timezone }}
 
 # Delegated to the control node. This is a Route53 API call, not a host
 # operation, and running it on the target requires boto3/botocore to be present
@@ -67,10 +86,17 @@
     type: A
     value: "{{ wg0 | default(ansible_default_ipv4.address) }}"
     ttl: 60
-  loop:
-    - "{{ dns.wtf }}"
+  # `dns.wtf` is the fleet-wide name every host gets. `dns_extra_zones` adds
+  # any ADDITIONAL zone the host should also answer on, and defaults to none.
+  loop: "{{ [dns.wtf] + (dns_extra_zones | default([])) }}"
   delegate_to: localhost
   become: false
+  # base_manage_dns is the COLLECTION's own gate, restored: the molecule
+  # scenario sets it false because a converge under test must never write a
+  # real Route53 record, and any environment without AWS credentials needs the
+  # same off-switch. Canonical stumpcloud/ansible runs only behind fleet
+  # inventory, where dns is always defined — the collection cannot assume
+  # that, so this is a deliberate, documented divergence.
   when: base_manage_dns | default(true) and (wg0 is defined or ansible_default_ipv4 is defined)
   # `localhost` is not declared in the inventories, so it inherits all.vars —
   # including `ansible_host: "{{ inventory_hostname }}.{{ dns.wtf }}"` and the
@@ -83,10 +109,17 @@
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
 
 # Absorbed from the deleted roles/host/tasks/stage-1-base.yaml. No-op unless
-# host_mtu is set, which is why it is safe in the common layer: only cloud01
-# sets it today (gva.yaml). Governing: ADR-0002.
+# host_mtu is set, which is why it is safe in the common layer.
+# Governing: ADR-0002.
+#
+# The second condition guards against ignore_unreachable (playbooks/base.yaml):
+# the template subscripts ansible_default_ipv4.interface, and an unreachable
+# host never ran "Gathering Facts" — Jinja raises on that rather than falling
+# through, turning an ignored UNREACHABLE into a hard task FAILURE.
 - name: Configure interface MTU (netplan drop-in)
-  when: host_mtu | default(none) is not none
+  when:
+    - host_mtu | default(none) is not none
+    - ansible_default_ipv4 is defined
   block:
     - name: Write netplan MTU drop-in
       ansible.builtin.copy:

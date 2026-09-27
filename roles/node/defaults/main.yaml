@@ -13,6 +13,10 @@ host_proxmox_network_bridge: "{{ proxmox.network_bridge | default('vmbr0') }}"
 # Per-host VM specs (overridden in inventory)
 host_vm_vmid: "{{ vm.vmid | default(omit) }}"
 host_vm_cores: "{{ vm.cores | default(4) }}"
+# Default to the host CPU model so guests inherit the hypervisor's instruction
+# set; the kvm64 default hides AVX/AVX2/AVX-512 and can make software segfault.
+# Safe on standalone hypervisors with no live migration.
+host_vm_cpu: "{{ vm.cpu | default('host') }}"
 host_vm_memory: "{{ vm.memory | default(8192) }}"
 host_vm_disk_size: "{{ vm.disk_size | default('100G') }}"
 host_vm_template: "{{ vm.template | default('ubuntu-24.04-cloud') }}"
@@ -80,7 +84,12 @@ host_ssh_keys:
 host_upload_private_ssh_key: false
 
 # --- Storage (ZFS) ---
-# host_zfs_pool.name must be set to enable ZFS setup. All other keys are optional.
+# host_zfs_pool.name names an EXISTING pool and enables the ZFS tasks for this
+# host: ZED email alerting, dataset creation, quota convergence, auto-import.
+#
+# The role does not create pools. `type`/`disks` document what the pool is made
+# of, not instructions to build it. If the named pool is not importable the
+# converge fails.
 # Example:
 #   host_zfs_pool:
 #     name: tank
@@ -142,9 +151,11 @@ host_wud_port: 3000
 # bouncer on the host. Only internet-exposed hosts (cloud01) set this; default
 # off = a no-op for every LAN host.
 host_edge_mode: false
-# Never ban these — loopback + WireGuard mesh + StumpCloud services LAN. Applied
-# to BOTH fail2ban (ignoreip) and CrowdSec (whitelist parser) so a fumbled login
-# from the mesh can never lock us out of the edge host.
+# Never ban these. Applied to BOTH fail2ban (ignoreip) and CrowdSec (whitelist
+# parser) so our own traffic can never lock us out of an internet-exposed host.
+#
+# This list must cover every path our traffic actually ARRIVES on, not just the
+# ones it is supposed to.
 host_edge_trusted_cidrs:
   - 127.0.0.1/8
   - ::1/128

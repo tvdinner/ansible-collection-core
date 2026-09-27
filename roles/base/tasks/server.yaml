@@ -62,17 +62,16 @@
   ansible.builtin.apt:
     autoremove: true
 
+# LSB Packages
+#
+# `lsb-release` only. `lsb-core` is a transitional LSB 4.1 compatibility
+# metapackage that Debian and Ubuntu have been dropping release by release,
+# and nothing here needs it: the `lsb_release` command ships in `lsb-release`.
 - name: Install LSB packages
   ansible.builtin.apt:
     state: present
-    name: "{{ base_lsb_packages }}"
-  # `is defined` guard: an unreachable host (playbooks/base.yaml's
-  # ignore_unreachable) never gets Gathering Facts, so ansible_distribution_release
-  # is undefined for it — a bare `!=` against an undefined value is a hard task
-  # FAILURE, not an ignored UNREACHABLE, and reintroduces the shard-wide cascade
-  # ignore_unreachable exists to prevent. Same class of bug as the Route53 task
-  # in ../common.yaml.
-  when: ansible_distribution_release is defined and ansible_distribution_release != 'noble'
+    name:
+      - lsb-release
 
 # Deliberately NOT upgrading pip itself. `pip install -U --target
 # /usr/lib/python3/dist-packages pip` writes a pip-installed pip over the

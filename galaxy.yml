@@ -1,6 +1,6 @@
 name: core
 namespace: tvdinner
-version: 1.0.0
+version: 1.1.0
 readme: README.md
 authors:
   - Joe Stump (@joestump)
@@ -12,10 +12,10 @@ tags:
   - docker
   - selfhosting
   - infrastructure
-repository: https://gitea.stump.rocks/tvdinner/ansible-collection-core
+repository: https://github.com/tvdinner/ansible-collection-core
 documentation: https://tvdinner.pages.stump.rocks/ansible-collection-core/
-homepage: https://gitea.stump.rocks/tvdinner
-issues: https://gitea.stump.rocks/tvdinner/ansible-collection-core/issues
+homepage: https://github.com/tvdinner
+issues: https://github.com/tvdinner/ansible-collection-core/issues
 description: Shared foundation for TV Dinner - the service and node roles, plus the common REST client base every tvdinner.* collection builds on.
 # Collections the service, base and node roles call into. Pinned loosely: the
 # roles use long-stable module surfaces (route53, docker_compose_v2, hashi_vault

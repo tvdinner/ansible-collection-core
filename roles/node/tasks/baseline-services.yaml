@@ -8,6 +8,7 @@
 
 # --- Dozzle Agent ---
 - name: Deploy Dozzle Agent
+  no_log: true
   community.docker.docker_compose_v2:
     project_name: dozzle-agent
     definition:
@@ -31,6 +32,7 @@
 
 # --- What's Up Docker (WUD) ---
 - name: Deploy WUD
+  no_log: true
   community.docker.docker_compose_v2:
     project_name: wud
     definition:
@@ -76,6 +78,7 @@
 
 # --- Autoheal ---
 - name: Deploy Autoheal
+  no_log: true
   community.docker.docker_compose_v2:
     project_name: autoheal
     definition:

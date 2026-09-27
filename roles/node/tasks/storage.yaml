@@ -1,8 +1,10 @@
 ---
 # roles/node/tasks/storage.yaml
-# ZFS pool setup, ZED email alerting, and node_exporter metrics.
+# ZFS dataset/quota convergence, ZED email alerting, and node_exporter metrics.
 # Only runs when host_zfs_pool.name is defined.
-# Governing: ADR-0020 (disk passthrough), ADR-0015 (observability)
+#
+# This role does NOT create ZFS pools. It converges what is inside an existing
+# pool. Governing: ADR-0020 (disk passthrough), ADR-0015 (observability)
 
 - name: Install ZFS and SMTP tools
   ansible.builtin.apt:
@@ -53,22 +55,12 @@
   changed_when: false
   when: host_zfs_pool.name is defined
 
-- name: Create ZFS pool
-  ansible.builtin.command: >
-    zpool create
-    -o ashift={{ host_zfs_pool.ashift | default(12) }}
-    -O compression={{ host_zfs_pool.compression | default('lz4') }}
-    -O atime={{ host_zfs_pool.atime | default('off') }}
-    -O xattr=sa
-    -O dnodesize=auto
-    -O mountpoint={{ host_zfs_pool.mountpoint | default('/' + host_zfs_pool.name) }}
-    {{ host_zfs_pool.name }}
-    {{ host_zfs_pool.type | default('raidz1') }}
-    {{ host_zfs_pool.disks | join(' ') }}
-  when:
-    - host_zfs_pool.name is defined
-    - _zpool_check.rc != 0
-  register: _zpool_create
+# Pool Creation Is Out Of Scope
+#
+# This role converges what is inside a pool — datasets, quotas, ZED alerting,
+# auto-import. Creating the pool is a deliberate human act; if the named pool
+# is not importable the converge fails. A declared pool that `zpool list`
+# cannot see is an error, not a cue to build one.
 
 - name: Create ZFS datasets
   ansible.builtin.command: zfs create {{ item }}

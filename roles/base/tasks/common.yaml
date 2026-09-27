@@ -91,7 +91,13 @@
   loop: "{{ [dns.wtf] + (dns_extra_zones | default([])) }}"
   delegate_to: localhost
   become: false
-  when: wg0 is defined or ansible_default_ipv4 is defined
+  # base_manage_dns is the COLLECTION's own gate, restored: the molecule
+  # scenario sets it false because a converge under test must never write a
+  # real Route53 record, and any environment without AWS credentials needs the
+  # same off-switch. Canonical stumpcloud/ansible runs only behind fleet
+  # inventory, where dns is always defined — the collection cannot assume
+  # that, so this is a deliberate, documented divergence.
+  when: base_manage_dns | default(true) and (wg0 is defined or ansible_default_ipv4 is defined)
   # `localhost` is not declared in the inventories, so it inherits all.vars —
   # including `ansible_host: "{{ inventory_hostname }}.{{ dns.wtf }}"` and the
   # fleet's become settings. Without these three lines the delegated task tries

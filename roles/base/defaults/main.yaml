@@ -75,6 +75,13 @@ base_pip_packages:
 # can be read against each other without deriving an offset by hand mid-incident.
 base_timezone: Etc/UTC
 
+# --- DNS registration ---
+#
+# Whether to manage the host's Route53 A record. Set to false in molecule/tests
+# and any environment without AWS credentials. Defaults to true so existing
+# stumpcloud behavior is unchanged.
+base_manage_dns: true
+
 # Optional interface MTU. Leave null on normal hosts (no-op). Set it on links
 # with a reduced path MTU — e.g. Infomaniak VPS uplinks run 1492 (gva.yaml sets
 # it for cloud01), so 1500-byte packets black-hole and SSH/TLS hang mid-handshake.
